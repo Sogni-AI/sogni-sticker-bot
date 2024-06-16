@@ -1,40 +1,100 @@
-const url = 'http://100.79.222.112:7860/sdapi/v1/txt2img';
+const url = 'http://100.79.222.112:7860/sdapi/v1';
 const axios = require('axios');
 const fs = require('fs');
 
-async function generateImage(prompt, model, seed) {
+function getRandomSeed() {
+  return Math.floor(Math.random() * 4294967296);
+}
+
+async function getAvailableModels() {
   try {
-    const response = await axios.post(url, {
-      prompt: prompt,
+    const response = await axios.get(`${url}/sd-models`);
+    const modelsAr = response.data;
+    return modelsAr.map(m => m.model_name);
+  } catch (error) {
+    console.error('Error fetching models:', error);
+  }
+}
+
+async function getAvailableLoras() {
+  try {
+    const response = await axios.get(`${url}/loras`);
+    return response.data.map(m => m.name);
+  } catch (error) {
+    console.error('Error fetching LoRAs:', error);
+  }
+}
+
+async function generateImage(prompt, negativePrompt, model, loras = [], seed = getRandomSeed(), batchSize = 1) {
+  const startTime = Date.now(); // Start the timer
+
+  if (seed < 0 || seed > 4294967295) {
+    console.error('Error: Seed value must be between 0 and 4294967295');
+    return;
+  }
+
+    // Include LoRAs in the prompt  <lora:princess_xl_v2:1>
+  const loraPrompt = loras.map(lora => `<lora:${lora}:1>`).join(' ');
+  const fullPrompt = `${prompt} ${loraPrompt}`.trim();
+
+  try {
+    const response = await axios.post(`${url}/txt2img`, {
+      prompt: fullPrompt,
+      negative_prompt: negativePrompt, // Add negative prompt here
       seed: seed,
-      sampler_name: 'Euler a',  // Adjust the sampler as needed
-      steps: 20, // Number of steps
-      width: 1024, // Width of the output image
-      height: 1024, // Height of the output image
-      cfg_scale: 7, // Classifier-Free Guidance Scale
-      model: model // Model name
+      sampler_name: 'Euler a',
+      steps: 20,
+      width: 1024,
+      height: 1024,
+      cfg_scale: 7,
+      n_iter: batchSize, // Number of images to generate in a batch
+      override_settings: {
+        sd_model_checkpoint: model
+      }
     });
 
-    // Assuming the response contains a base64-encoded image
-    const imageBase64 = response.data.images[0]; // Adjust based on actual response structure
+    const endTime = Date.now(); // End the timer
+    const timeTaken = (endTime - startTime) / 1000; // Calculate time taken in seconds
 
-    // Convert base64 to buffer
-    const imageBuffer = Buffer.from(imageBase64, 'base64');
+    // Iterate over each generated image
+    response.data.images.forEach((imageBase64, index) => {
+      // Convert base64 to buffer
+      const imageBuffer = Buffer.from(imageBase64, 'base64');
 
-    // Write the buffer to a file
-    fs.writeFileSync(+new Date() +'.png', imageBuffer);
+      // Create filename with time, model, seed, and batch index
+      const filename = `renders/${model}_${seed}_${timeTaken.toFixed(2)}_${index + 1}.png`;
 
-    console.log('Image saved as output.png');
+      // Write the buffer to a file
+      fs.writeFileSync(filename, imageBuffer);
+
+      console.log(`Image saved as ${filename}`);
+    });
+
+    console.log(`Total time taken: ${timeTaken.toFixed(2)} seconds`);
   } catch (error) {
     console.error('Error generating image:', error);
   }
 }
 
 // Define your parameters
-const prompt = 'a futuristic cityscape with flying cars';
-//const model = 'stable-diffusion-v1-4'; // Replace with the actual model name if different
-const model = 'zavychromaxl_v70';
-const seed = 123457;
+const prompt = 'futuristic cityscape';
+const negativePrompt = 'blurry, low quality, distorted, corner signature, corner logo';
+const model = 'SDXLFaetastic_v24';
+const seed = getRandomSeed(); // Initial seed
+const loras = []; // Add your LoRA names here
+const batchSize = 10; // Number of images to generate in batch
 
 // Call the function
-generateImage(prompt, model, seed);
+generateImage(prompt, negativePrompt, model, loras, seed, batchSize);
+
+/*
+// Call the functions to get available models and LoRAs
+getAvailableModels().then(models => {
+  console.log('Available models:', models);
+});
+
+getAvailableLoras().then(loras => {
+  console.log('Available LoRAs:', loras);
+});
+*/
+
