@@ -44,8 +44,8 @@ async function generateImage(prompt, negativePrompt, model, loras = [], seed = g
       seed: seed,
       sampler_name: 'Euler a',
       steps: 20,
-      width: 1024,
-      height: 1024,
+      width: 512,
+      height: 512,
       cfg_scale: 7,
       n_iter: batchSize, // Number of images to generate in a batch
       override_settings: {
@@ -77,17 +77,17 @@ async function generateImage(prompt, negativePrompt, model, loras = [], seed = g
 }
 
 // Define your parameters
-const prompt = 'futuristic cityscape';
-const negativePrompt = 'blurry, low quality, distorted, corner signature, corner logo';
-const model = 'SDXLFaetastic_v24';
+const prompt = 'Clouds of color, blue skies, dawn glow, epic, visual motion-illusion, creative rush';
+const negativePrompt = 'blurry, low quality, distorted, corner signature, corner logo, comic book, ugly, bad anatomy, disfigured, ugly face, discombobulated, comic strip';
+const model = 'zavychromaxl_v70';
 const seed = getRandomSeed(); // Initial seed
-const loras = []; // Add your LoRA names here
+const loras = []; //['princess_xl_v2', 'realisticVisionV60B1_v51HyperVAE']; // Add your LoRA names here
 const batchSize = 10; // Number of images to generate in batch
 
 // Call the function
 generateImage(prompt, negativePrompt, model, loras, seed, batchSize);
 
-/*
+
 // Call the functions to get available models and LoRAs
 getAvailableModels().then(models => {
   console.log('Available models:', models);
@@ -96,5 +96,5 @@ getAvailableModels().then(models => {
 getAvailableLoras().then(loras => {
   console.log('Available LoRAs:', loras);
 });
-*/
+
 
