@@ -1,11 +1,12 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
+const Jimp = require('jimp');
 const axios = require('axios');
 const fs = require('fs');
 
 // Load the token from the .env file
 const token = process.env.TELEGRAM_BOT_TOKEN;
-
+console.log('token', token);
 const bot = new TelegramBot(token, { polling: true });
 
 const startTelegramBot = (automatic) => {
@@ -27,15 +28,15 @@ const startTelegramBot = (automatic) => {
       const loras = []; //['princess_xl_v2', 'realisticVisionV60B1_v51HyperVAE']; // Add your LoRA names here
       const batchSize = 1; // Number of images to generate in batch
 
-      bot.sendMessage(chatId, `Generating stickers for: ${prompt}...`);
+      bot.sendMessage(chatId, `Generating a sticker for: ${prompt}`);
 
       try {
         const savedFiles = await automatic.generateImage(prompt + ' ' + style, negativePrompt, model, loras, seed, batchSize);
 
         if (savedFiles.length > 0) {
-          for (const filePath of savedFiles) {
-            await bot.sendPhoto(chatId, fs.createReadStream(filePath));
-          }
+          const filePath = savedFiles[0];
+          const stickerFilePath = await convertImageToSticker(filePath);
+          await bot.sendSticker(chatId, stickerFilePath);
           bot.sendMessage(chatId, 'Here you go! Any other ideas?');
         } else {
           bot.sendMessage(chatId, 'Failed to generate the image. Please try again.');
@@ -50,6 +51,18 @@ const startTelegramBot = (automatic) => {
   bot.on('polling_error', (error) => {
     console.error('Polling error:', error);
   });
+};
+
+// Function to convert an image to a sticker-compliant format
+const convertImageToSticker = async (filePath) => {
+  const image = await Jimp.read(filePath);
+  const outputFilePath = `${filePath.replace('.png', '_sticker.png')}`;
+
+  await image
+    .resize(512, 512) // Resize to 512x512
+    .writeAsync(outputFilePath);
+
+  return outputFilePath;
 };
 
 module.exports = startTelegramBot;
