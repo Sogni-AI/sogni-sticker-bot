@@ -29,7 +29,7 @@ const startTelegramBot = (automatic) => {
     const chatId = msg.chat.id;
     const userMessage = msg.text && msg.text.toLowerCase();
 
-    if (userMessage.startsWith('hi') || userMessage.startsWith('hello')) {
+    if (userMessage && (userMessage.startsWith('hi') || userMessage.startsWith('hello'))) {
       bot.sendMessage(chatId, `Hello, I am Sogni AI sticker bot! Type /start to get started!`);
     } else if (userMessage && !userMessage.startsWith('/')) {
       const prompt = msg.text;
@@ -55,7 +55,7 @@ const startTelegramBot = (automatic) => {
           // Check if the file exists before sending
           if (fs.existsSync(stickerFilePath)) {
             await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
-            bot.sendMessage(chatId, 'Here you go! Any other ideas?');
+            bot.sendMessage(chatId, 'Here you go! Right-click / long press to save it! Want to create a sticker pack of your favs? You need to message the sticker bot. @stickers');
           } else {
             bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
           }
