@@ -1,8 +1,8 @@
 const axios = require('axios');
 const fs = require('fs');
 
-const url = 'https://automatic.sogni.ai/sdapi/v1';
-//const url = 'http://100.79.222.112:7860/sdapi/v1';
+//const url = 'https://automatic.sogni.ai/sdapi/v1';
+const url = 'http://100.79.222.112:7860/sdapi/v1';
 
 function getRandomSeed() {
   return Math.floor(Math.random() * 4294967296);
