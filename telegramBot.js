@@ -1,7 +1,7 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const Jimp = require('jimp');
-const sharp = require('sharp'); // Import sharp for image compression
+const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 
@@ -32,40 +32,43 @@ const startTelegramBot = (automatic) => {
       bot.sendMessage(chatId, `Hello, I am Sogni AI sticker bot! Type /start to get started!`);
     } else if (userMessage && !userMessage.startsWith('/')) {
       const prompt = msg.text;
-      const style = ',One big Sticker, cartoon, white background';
+      const style = ',One big Sticker, white outline, cartoon, purple background';
       const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
       const model = 'flux1-schnell-fp8';
-      const seed = automatic.getRandomSeed(); // Initial seed
-      const loras = []; // Add your LoRA names here
-      const batchSize = 1; // Number of images to generate in batch
+      const loras = [];
+      const batchSize = 1;
 
-      bot.sendMessage(chatId, `Generating a sticker for: ${prompt}`);
+      bot.sendMessage(chatId, `Generating stickers for: ${prompt}`);
 
-      try {
-        const { images: savedFiles, masks: savedMasks } = await automatic.generateImage(prompt + ' ' + style, negativePrompt, model, loras, seed, batchSize);
+      for (let i = 0; i < 3; i++) {
+        try {
+          const seed = automatic.getRandomSeed();
+          const { images: savedFiles } = await automatic.generateImage(prompt + ' ' + style, negativePrompt, model, loras, seed, batchSize);
 
-        if (savedFiles.length > 0 && savedMasks.length > 0) {
-          const filePath = savedFiles[0];
-          const maskPath = savedMasks[0];
-          const stickerFilePath = await convertImageToSticker(filePath, maskPath);
+          if (savedFiles.length > 0) {
+            const filePath = savedFiles[0];
+            const stickerFilePath = await convertImageToSticker(filePath);
 
-          // Add a delay to ensure the file is written to disk
-          await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise(resolve => setTimeout(resolve, 1000));
 
-          // Check if the file exists before sending
-          if (fs.existsSync(stickerFilePath)) {
-            await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
-            bot.sendMessage(chatId, 'Here you go! Right-click / long press to save it! Want to create a sticker pack of your favs? You need to message the sticker bot. @stickers');
+            if (fs.existsSync(stickerFilePath)) {
+              await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
+            } else {
+              bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
+              break;
+            }
           } else {
-            bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
+            bot.sendMessage(chatId, 'Failed to generate the image. Please try again.');
+            break;
           }
-        } else {
-          bot.sendMessage(chatId, 'Failed to generate the image. Please try again.');
+        } catch (error) {
+          console.error('Error generating images or sending photos:', error);
+          bot.sendMessage(chatId, 'An error occurred while processing your request. Please try again.');
+          break;
         }
-      } catch (error) {
-        console.error('Error generating images or sending photos:', error);
-        bot.sendMessage(chatId, 'An error occurred while processing your request. Please try again.');
       }
+
+      bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them! Want to create a sticker pack of your favs? You need to message the sticker bot. @stickers');
     }
   });
 
@@ -74,57 +77,110 @@ const startTelegramBot = (automatic) => {
   });
 };
 
-// Function to determine if a color is a shade of gray
-const isShadeOfGray = (color) => {
-  const { r, g, b } = Jimp.intToRGBA(color);
-  return r === g && g === b;
+// Helper function to convert RGB to HSL
+const rgbToHsl = (r, g, b) => {
+  // Convert r,g,b from [0,255] to [0,1]
+  r /= 255, g /= 255, b /= 255;
+
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s, l = (max + min) / 2;
+
+  if (max == min){
+    h = 0; // achromatic
+    s = 0;
+  } else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch(max){
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)) * 60; break;
+      case g: h = ((b - r) / d + 2) * 60; break;
+      case b: h = ((r - g) / d + 4) * 60; break;
+    }
+  }
+
+  return { h, s, l };
 };
 
-// Function to convert an image to a sticker-compliant format using the mask
-const convertImageToSticker = async (filePath, maskPath) => {
+// Helper function to check if a color is within the background purple range using HSL
+const isBackgroundPurple = (r, g, b) => {
+  const { h, s, l } = rgbToHsl(r, g, b);
+
+  // Purple hue range is approximately between 260 and 300 degrees
+  // Adjust saturation and lightness thresholds as needed
+  return (
+    (h >= 260 && h <= 300) &&
+    s >= 0.2 && s <= 1 &&
+    l >= 0.1 && l <= 0.9
+  );
+};
+
+// Update the convertImageToSticker function to remove all purple pixels everywhere
+const convertImageToSticker = async (filePath) => {
   try {
     const image = await Jimp.read(filePath);
-    const mask = await Jimp.read(maskPath);
 
-    // Ensure the mask is properly scaled to match the image
-    mask.resize(image.bitmap.width, image.bitmap.height);
+    const width = image.bitmap.width;
+    const height = image.bitmap.height;
 
-    // Iterate over each pixel in the mask and image to apply transparency
-    for (let y = 0; y < image.bitmap.height; y++) {
-      for (let x = 0; x < image.bitmap.width; x++) {
-        const maskPixel = mask.getPixelColor(x, y);
-        const imagePixel = image.getPixelColor(x, y);
-        const imageRGBA = Jimp.intToRGBA(imagePixel);
+    // Iterate over all pixels
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const pixelColor = image.getPixelColor(x, y);
+        const { r, g, b, a } = Jimp.intToRGBA(pixelColor);
 
-        // If the mask pixel is a shade of gray, make the image pixel transparent
-        if (isShadeOfGray(maskPixel)) {
-          imageRGBA.a = 0; // Set alpha to 0 to make it fully transparent
-        } else {
-          imageRGBA.a = 255; // Keep alpha at 255 to make it fully opaque
+        if (isBackgroundPurple(r, g, b)) {
+          // Set pixel to transparent
+          image.setPixelColor(Jimp.rgbaToInt(0, 0, 0, 0), x, y);
         }
-
-        image.setPixelColor(Jimp.rgbaToInt(imageRGBA.r, imageRGBA.g, imageRGBA.b, imageRGBA.a), x, y);
       }
     }
 
-    const outputFilePath = `${filePath.replace('.png', '_sticker.png')}`;
-    await image.writeAsync(outputFilePath);
-    console.log('Sticker created at:', outputFilePath);
-
-    // Compress the image if it exceeds 300KB
-    const stats = fs.statSync(outputFilePath);
-    if (stats.size > 300 * 1024) { // 300KB in bytes
-      const compressedFilePath = outputFilePath.replace('.png', '_compressed.png');
-      await sharp(outputFilePath)
-        .png({ quality: 80 }) // Adjust quality as needed
-        .toFile(compressedFilePath);
-
-      // Replace the original with the compressed file
-      fs.unlinkSync(outputFilePath);
-      fs.renameSync(compressedFilePath, outputFilePath);
+    // Resize image if necessary
+    const maxDimension = 512;
+    if (width > maxDimension || height > maxDimension) {
+      image.scaleToFit(maxDimension, maxDimension);
     }
 
-    return outputFilePath;
+    const outputFilePathPng = `${filePath.replace('.png', '_sticker.png')}`;
+    await image.writeAsync(outputFilePathPng);
+    console.log('Sticker PNG created at:', outputFilePathPng);
+
+    const outputFilePathWebp = outputFilePathPng.replace('.png', '.webp');
+    await sharp(outputFilePathPng)
+      .webp({
+        quality: 100,
+        lossless: true,
+        alphaQuality: 100
+      })
+      .toFile(outputFilePathWebp);
+    console.log('Sticker WEBP created at:', outputFilePathWebp);
+
+    fs.unlinkSync(outputFilePathPng);
+
+    let stats = fs.statSync(outputFilePathWebp);
+    let quality = 100;
+    while (stats.size > 512 * 1024 && quality > 10) {
+      quality -= 10;
+      const compressedFilePath = outputFilePathWebp.replace('.webp', '_compressed.webp');
+      await sharp(outputFilePathWebp)
+        .webp({
+          quality,
+          lossless: true,
+          alphaQuality: 100
+        })
+        .toFile(compressedFilePath);
+
+      fs.unlinkSync(outputFilePathWebp);
+      fs.renameSync(compressedFilePath, outputFilePathWebp);
+
+      stats = fs.statSync(outputFilePathWebp);
+    }
+
+    if (stats.size > 512 * 1024) {
+      throw new Error('Unable to compress the sticker below 512KB.');
+    }
+
+    return outputFilePathWebp;
   } catch (error) {
     console.error('Error converting image to sticker:', error);
     throw error;
