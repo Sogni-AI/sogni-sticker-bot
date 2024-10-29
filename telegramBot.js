@@ -18,6 +18,11 @@ const bot = new TelegramBot(token, {
   }
 });
 
+// Initialize the request queue and pending users
+const requestQueue = [];
+const pendingUsers = new Set();
+let isProcessing = false;
+
 const startTelegramBot = (automatic) => {
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
@@ -26,49 +31,29 @@ const startTelegramBot = (automatic) => {
 
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
     const userMessage = msg.text && msg.text.toLowerCase();
 
     if (userMessage && (userMessage.startsWith('hi') || userMessage.startsWith('hello'))) {
       bot.sendMessage(chatId, `Hello, I am Sogni AI sticker bot! Type /start to get started!`);
     } else if (userMessage && !userMessage.startsWith('/')) {
-      const prompt = msg.text;
-      const style = ',One big Sticker, white outline, cartoon, purple background';
-      const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
-      const model = 'flux1-schnell-fp8';
-      const loras = [];
-      const batchSize = 1;
-
-      bot.sendMessage(chatId, `Generating stickers for: ${prompt}`);
-
-      for (let i = 0; i < 3; i++) {
-        try {
-          const seed = automatic.getRandomSeed();
-          const { images: savedFiles } = await automatic.generateImage(prompt + ' ' + style, negativePrompt, model, loras, seed, batchSize);
-
-          if (savedFiles.length > 0) {
-            const filePath = savedFiles[0];
-            const stickerFilePath = await convertImageToSticker(filePath);
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            if (fs.existsSync(stickerFilePath)) {
-              await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
-            } else {
-              bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
-              break;
-            }
-          } else {
-            bot.sendMessage(chatId, 'Failed to generate the image. Please try again.');
-            break;
-          }
-        } catch (error) {
-          console.error('Error generating images or sending photos:', error);
-          bot.sendMessage(chatId, 'An error occurred while processing your request. Please try again.');
-          break;
-        }
+      if (pendingUsers.has(userId)) {
+        bot.sendMessage(chatId, `You already have a pending request. Please wait until it's processed.`);
+        return;
       }
 
-      bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them! Want to create a sticker pack of your favs? You need to message the sticker bot. @stickers');
+      // Add request to queue
+      requestQueue.push({ userId, chatId, message: msg });
+      pendingUsers.add(userId);
+
+      if (isProcessing) {
+        const positionInQueue = requestQueue.findIndex(req => req.userId === userId) + 1;
+        bot.sendMessage(chatId, `Your request is queued. You are number ${positionInQueue} in the queue.`);
+      } else {
+        bot.sendMessage(chatId, `Generating stickers for: ${msg.text}`);
+      }
+
+      processNextRequest(automatic);
     }
   });
 
@@ -77,10 +62,71 @@ const startTelegramBot = (automatic) => {
   });
 };
 
+async function processNextRequest(automatic) {
+  if (isProcessing) {
+    return;
+  }
+
+  if (requestQueue.length === 0) {
+    return;
+  }
+
+  isProcessing = true;
+
+  const { userId, chatId, message } = requestQueue.shift();
+
+  try {
+    const prompt = message.text;
+    const style = ',One big Sticker, thin white outline, cartoon, purple background';
+    const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
+    const model = 'flux1-schnell-fp8';
+    const loras = [];
+    const batchSize = 1;
+
+    for (let i = 0; i < 3; i++) {
+      try {
+        const seed = automatic.getRandomSeed();
+        const { images: savedFiles } = await automatic.generateImage(prompt + ' ' + style, negativePrompt, model, loras, seed, batchSize);
+
+        if (savedFiles.length > 0) {
+          const filePath = savedFiles[0];
+          const stickerFilePath = await convertImageToSticker(filePath);
+
+          await new Promise(resolve => setTimeout(resolve, 1000));
+
+          if (fs.existsSync(stickerFilePath)) {
+            await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
+          } else {
+            bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
+            break;
+          }
+        } else {
+          bot.sendMessage(chatId, 'Failed to generate the image. Please try again.');
+          break;
+        }
+      } catch (error) {
+        console.error('Error generating images or sending photos:', error);
+        bot.sendMessage(chatId, 'An error occurred while processing your request. Please try again.');
+        break;
+      }
+    }
+
+    bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them! Want to create a sticker pack of your favs? You need to message the sticker bot. @stickers');
+
+  } finally {
+    // Remove user from pendingUsers
+    pendingUsers.delete(userId);
+    isProcessing = false;
+
+    // Process next request
+    processNextRequest(automatic);
+  }
+}
+
 // Helper function to convert RGB to HSL
 const rgbToHsl = (r, g, b) => {
   // Convert r,g,b from [0,255] to [0,1]
-  r /= 255, g /= 255, b /= 255;
+  r /= 255; g /= 255; b /= 255;
 
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
   let h, s, l = (max + min) / 2;
