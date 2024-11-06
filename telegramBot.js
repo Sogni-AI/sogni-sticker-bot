@@ -8,7 +8,7 @@ const path = require('path');
 // Load the token from the .env file
 const token = process.env.TELEGRAM_BOT_TOKEN;
 console.log('token', token);
-const bot = new TelegramBot(token, {
+let bot = new TelegramBot(token, {
   polling: true,
   request: {
     agentOptions: {
@@ -22,6 +22,8 @@ const bot = new TelegramBot(token, {
 const requestQueue = [];
 const pendingUsers = new Set();
 let isProcessing = false;
+let retryCount = 0;
+const maxRetries = 5;
 
 const startTelegramBot = (automatic) => {
   bot.onText(/\/start/, (msg) => {
@@ -57,10 +59,36 @@ const startTelegramBot = (automatic) => {
     }
   });
 
-  bot.on('polling_error', (error) => {
-    console.error('Polling error:', error);
-  });
+  // Set up polling error handler with retry and backoff
+  bot.on('polling_error', handlePollingError);
 };
+
+// Error handler with retry logic and backoff
+function handlePollingError(error) {
+  console.error('Polling error:', error);
+
+  if (retryCount < maxRetries) {
+    const backoffTime = Math.pow(2, retryCount) * 1000; // Exponential backoff: 1s, 2s, 4s, etc.
+    console.log(`Retrying in ${backoffTime / 1000} seconds... (attempt ${retryCount + 1})`);
+
+    setTimeout(() => {
+      retryCount++;
+      bot = new TelegramBot(token, {
+        polling: true,
+        request: {
+          agentOptions: {
+            keepAlive: true,
+            family: 4
+          }
+        }
+      });
+      startTelegramBot(true); // Restart bot on error with backoff
+    }, backoffTime);
+  } else {
+    console.error('Max retries reached. Bot is stopping.');
+    process.exit(1); // Exit script if max retries are exceeded
+  }
+}
 
 async function processNextRequest(automatic) {
   if (isProcessing) {
@@ -92,6 +120,7 @@ async function processNextRequest(automatic) {
           const filePath = savedFiles[0];
           const stickerFilePath = await convertImageToSticker(filePath);
 
+          // Delay to ensure file is saved properly
           await new Promise(resolve => setTimeout(resolve, 1000));
 
           if (fs.existsSync(stickerFilePath)) {
