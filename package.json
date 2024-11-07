@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@sogni-ai/sogni-client": "^0.0.10",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "jimp": "^0.22.12",

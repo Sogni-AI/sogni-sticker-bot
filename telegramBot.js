@@ -105,7 +105,7 @@ async function processNextRequest(automatic) {
 
   try {
     const prompt = message.text;
-    const style = ',One big Sticker, thin white outline, cartoon, purple background';
+    const style = ',One big Sticker, thin white outline, cartoon, green screen background';
     const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
     const loras = [];
@@ -140,7 +140,7 @@ async function processNextRequest(automatic) {
       }
     }
 
-    bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them! Want to create a sticker pack of your favs? You need to message the sticker bot. @stickers');
+    bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them! Want to create a sticker pack of your favs? Follow directions here: https://docs.sogni.ai/learn/telegram-ai-sticker-bot');
 
   } finally {
     // Remove user from pendingUsers
@@ -152,16 +152,16 @@ async function processNextRequest(automatic) {
   }
 }
 
-// Helper function to convert RGB to HSL
 const rgbToHsl = (r, g, b) => {
-  // Convert r,g,b from [0,255] to [0,1]
-  r /= 255; g /= 255; b /= 255;
+  r /= 255;
+  g /= 255;
+  b /= 255;
 
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
   let h, s, l = (max + min) / 2;
 
   if (max == min){
-    h = 0; // achromatic
+    h = 0;
     s = 0;
   } else {
     const d = max - min;
@@ -176,22 +176,20 @@ const rgbToHsl = (r, g, b) => {
   return { h, s, l };
 };
 
-// Helper function to check if a color is within the background purple range using HSL
-const isBackgroundPurple = (r, g, b) => {
+const isBackgroundGreenScreen = (r, g, b) => {
   const { h, s, l } = rgbToHsl(r, g, b);
 
-  // Purple hue range is approximately between 260 and 300 degrees
-  // Adjust saturation and lightness thresholds as needed
   return (
-    (h >= 260 && h <= 300) &&
-    s >= 0.2 && s <= 1 &&
-    l >= 0.1 && l <= 0.9
+    (h >= 85 && h <= 145) &&  // Slightly wider hue range
+    s >= 0.4 && s <= 1 &&     // Slightly broader saturation range
+    l >= 0.3 && l <= 0.85     // Broadened lightness range
   );
 };
 
-// Update the convertImageToSticker function to remove all purple pixels everywhere
+// Update the convertImageToSticker function to remove green pixels
 const convertImageToSticker = async (filePath) => {
   try {
+    console.log(`Processing file for sticker: ${filePath}`);
     const image = await Jimp.read(filePath);
 
     const width = image.bitmap.width;
@@ -203,14 +201,12 @@ const convertImageToSticker = async (filePath) => {
         const pixelColor = image.getPixelColor(x, y);
         const { r, g, b, a } = Jimp.intToRGBA(pixelColor);
 
-        if (isBackgroundPurple(r, g, b)) {
-          // Set pixel to transparent
-          image.setPixelColor(Jimp.rgbaToInt(0, 0, 0, 0), x, y);
+        if (isBackgroundGreenScreen(r, g, b)) {
+          image.setPixelColor(Jimp.rgbaToInt(0, 0, 0, 0), x, y); // Set to transparent
         }
       }
     }
 
-    // Resize image if necessary
     const maxDimension = 512;
     if (width > maxDimension || height > maxDimension) {
       image.scaleToFit(maxDimension, maxDimension);
@@ -249,6 +245,7 @@ const convertImageToSticker = async (filePath) => {
       fs.renameSync(compressedFilePath, outputFilePathWebp);
 
       stats = fs.statSync(outputFilePathWebp);
+      console.log(`Compressed sticker WEBP created at ${outputFilePathWebp} with quality ${quality}`);
     }
 
     if (stats.size > 512 * 1024) {
