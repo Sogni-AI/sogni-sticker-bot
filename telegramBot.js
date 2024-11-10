@@ -180,9 +180,10 @@ const isBackgroundGreenScreen = (r, g, b) => {
   const { h, s, l } = rgbToHsl(r, g, b);
 
   return (
-    (h >= 85 && h <= 145) &&  // Slightly wider hue range
-    s >= 0.4 && s <= 1 &&     // Slightly broader saturation range
-    l >= 0.3 && l <= 0.85     // Broadened lightness range
+    (h >= 70 && h <= 160) &&  // Expanded hue range to cover more green shades
+    s >= 0.3 && s <= 1 &&     // Adjusted saturation range
+    l >= 0.2 && l <= 0.9 &&   // Adjusted lightness range
+    (g > r * 1.3) && (g > b * 1.3)  // Ensure green component is significantly higher than red and blue
   );
 };
 
