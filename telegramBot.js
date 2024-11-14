@@ -1,9 +1,10 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const Jimp = require('jimp');
 const sharp = require('sharp');
 const fs = require('fs');
-const path = require('path');
+const saveFile = require('./lib/saveFile');
+const removeImageBgOriginal = require('./lib/removeImageBgOriginal');
+const removeImageBg = require('./lib/removeImageBg');
 
 // Load the token from the .env file
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -25,7 +26,7 @@ let isProcessing = false;
 let retryCount = 0;
 const maxRetries = 5;
 
-const startTelegramBot = (automatic) => {
+const startTelegramBot = (sogni) => {
   bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
     bot.sendMessage(chatId, 'Good day! What would you like me to create a sticker of?');
@@ -55,7 +56,7 @@ const startTelegramBot = (automatic) => {
         bot.sendMessage(chatId, `Generating stickers for: ${msg.text}`);
       }
 
-      processNextRequest(automatic);
+      processNextRequest(sogni);
     }
   });
 
@@ -90,7 +91,7 @@ function handlePollingError(error) {
   }
 }
 
-async function processNextRequest(automatic) {
+async function processNextRequest(sogni) {
   if (isProcessing) {
     return;
   }
@@ -102,35 +103,57 @@ async function processNextRequest(automatic) {
   isProcessing = true;
 
   const { userId, chatId, message } = requestQueue.shift();
+  const continueProcessing = async () => {
+    // Remove user from pendingUsers
+    pendingUsers.delete(userId);
+    isProcessing = false;
+
+    // Process next request
+    processNextRequest(sogni);
+  }
 
   try {
     const prompt = message.text;
-    const style = ',One big Sticker, thin white outline, cartoon, green screen background';
+    const style = 'One big Sticker, thin white outline, cartoon, grey solid background';
     const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
-    const loras = [];
-    const batchSize = 1;
+    const batchSize = 3;
 
-    for (let i = 0; i < 3; i++) {
+    const project = await sogni.projects.create({
+      modelId: model,
+      positivePrompt: prompt,
+      negativePrompt: negativePrompt,
+      stylePrompt: style,
+      steps: 4,
+      guidance: 1,
+      numberOfImages: batchSize,
+      scheduler: 'Euler',
+      timeStepSpacing: 'Linear'
+    });
+
+    let images;
+    try {
+        images = await project.waitForCompletion();
+    } catch (error) {
+        console.error('Error generating images', error);
+        bot.sendMessage(chatId, 'An error occurred while processing your request. Please try again.');
+        return continueProcessing();
+    }
+
+    for (let i = 0; i < images.length; i++) {
       try {
-        const seed = automatic.getRandomSeed();
-        const { images: savedFiles } = await automatic.generateImage(prompt + ' ' + style, negativePrompt, model, loras, seed, batchSize);
+        const imageUrl = images[i];
+        const filePath = `renders/${project.id}_${i + 1}.png`;
+        // Download the image to the file path using axios and streams
+        await saveFile(filePath, imageUrl);
+        const stickerFilePath = await convertImageToSticker(filePath);
+        // Delay to ensure file is saved properly
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
-        if (savedFiles.length > 0) {
-          const filePath = savedFiles[0];
-          const stickerFilePath = await convertImageToSticker(filePath);
-
-          // Delay to ensure file is saved properly
-          await new Promise(resolve => setTimeout(resolve, 1000));
-
-          if (fs.existsSync(stickerFilePath)) {
-            await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
-          } else {
-            bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
-            break;
-          }
+        if (fs.existsSync(stickerFilePath)) {
+          await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
         } else {
-          bot.sendMessage(chatId, 'Failed to generate the image. Please try again.');
+          bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
           break;
         }
       } catch (error) {
@@ -148,67 +171,21 @@ async function processNextRequest(automatic) {
     isProcessing = false;
 
     // Process next request
-    processNextRequest(automatic);
+    processNextRequest(sogni);
   }
 }
-
-const rgbToHsl = (r, g, b) => {
-  r /= 255;
-  g /= 255;
-  b /= 255;
-
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h, s, l = (max + min) / 2;
-
-  if (max == min){
-    h = 0;
-    s = 0;
-  } else {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch(max){
-      case r: h = ((g - b) / d + (g < b ? 6 : 0)) * 60; break;
-      case g: h = ((b - r) / d + 2) * 60; break;
-      case b: h = ((r - g) / d + 4) * 60; break;
-    }
-  }
-
-  return { h, s, l };
-};
-
-const isBackgroundGreenScreen = (r, g, b) => {
-  const { h, s, l } = rgbToHsl(r, g, b);
-
-  return (
-    (h >= 70 && h <= 160) &&  // Expanded hue range to cover more green shades
-    s >= 0.3 && s <= 1 &&     // Adjusted saturation range
-    l >= 0.2 && l <= 0.9 &&   // Adjusted lightness range
-    (g > r * 1.3) && (g > b * 1.3)  // Ensure green component is significantly higher than red and blue
-  );
-};
 
 // Update the convertImageToSticker function to remove green pixels
 const convertImageToSticker = async (filePath) => {
   try {
     console.log(`Processing file for sticker: ${filePath}`);
-    const image = await Jimp.read(filePath);
+    // Or use removeImageBgOriginal for previous implementation
+    const image = await removeImageBg(filePath);
 
     const width = image.bitmap.width;
     const height = image.bitmap.height;
-
-    // Iterate over all pixels
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const pixelColor = image.getPixelColor(x, y);
-        const { r, g, b, a } = Jimp.intToRGBA(pixelColor);
-
-        if (isBackgroundGreenScreen(r, g, b)) {
-          image.setPixelColor(Jimp.rgbaToInt(0, 0, 0, 0), x, y); // Set to transparent
-        }
-      }
-    }
-
     const maxDimension = 512;
+
     if (width > maxDimension || height > maxDimension) {
       image.scaleToFit(maxDimension, maxDimension);
     }

@@ -1,11 +1,18 @@
 {
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
   "dependencies": {
-    "@sogni-ai/sogni-client": "^0.0.10",
-    "axios": "^1.7.2",
+    "@sogni-ai/sogni-client": "^0.0.19",
+    "axios": "^1.7.7",
     "dotenv": "^16.4.5",
     "jimp": "^0.22.12",
     "node-telegram-bot-api": "^0.66.0",
     "replace-color": "^2.3.0",
     "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
   }
 }
