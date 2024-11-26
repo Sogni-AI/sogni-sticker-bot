@@ -128,7 +128,9 @@ async function processNextRequest(sogni) {
       guidance: 1,
       numberOfImages: batchSize,
       scheduler: 'Euler',
-      timeStepSpacing: 'Linear'
+      timeStepSpacing: 'Linear',
+      disableNSFWFilter: true,
+      numberOfPreviews: 0
     });
 
     let images;
