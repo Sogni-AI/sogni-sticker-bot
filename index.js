@@ -1,3 +1,4 @@
+require('dotenv').config();
 const fs = require('fs');
 const sogniPromise = require('./sogni');
 const startTelegramBot = require('./telegramBot');
