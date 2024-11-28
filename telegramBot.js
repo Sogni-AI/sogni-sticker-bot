@@ -1,4 +1,3 @@
-require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const sharp = require('sharp');
 const fs = require('fs');
@@ -128,7 +127,9 @@ async function processNextRequest(sogni) {
       guidance: 1,
       numberOfImages: batchSize,
       scheduler: 'Euler',
-      timeStepSpacing: 'Linear'
+      timeStepSpacing: 'Linear',
+      disableNSFWFilter: true,
+      numberOfPreviews: 0
     });
 
     let images;
