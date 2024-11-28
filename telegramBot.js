@@ -114,7 +114,7 @@ async function processNextRequest(sogni) {
 
   try {
     const prompt = message.text;
-    const style = 'One big Sticker, thin white outline, cartoon, grey solid background';
+    const style = 'One big Sticker, thin white outline, cartoon, greenscreen background';
     const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
     const batchSize = 3;
@@ -180,7 +180,7 @@ const convertImageToSticker = async (filePath) => {
   try {
     console.log(`Processing file for sticker: ${filePath}`);
     // Or use removeImageBgOriginal for previous implementation
-    const image = await removeImageBg(filePath);
+    const image = await removeImageBgOriginal(filePath);
 
     const width = image.bitmap.width;
     const height = image.bitmap.height;
