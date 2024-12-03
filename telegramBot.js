@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const saveFile = require('./lib/saveFile');
-const removeImageBg = require('./lib/removeImageBg');
+const removeImageBg = require('./lib/removeImageBgOriginal');
 const convertImageToSticker = require('./lib/convertImageToSticker');
 
 // Load the Telegram token from the .env file

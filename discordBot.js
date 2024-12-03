@@ -2,7 +2,7 @@ const { Client, GatewayIntentBits, AttachmentBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const saveFile = require('./lib/saveFile');
-const removeImageBg = require('./lib/removeImageBg');
+const removeImageBg = require('./lib/removeImageBgOriginal');
 
 // Load the Discord token from the environment variables
 const token = process.env.DISCORD_BOT_TOKEN;
