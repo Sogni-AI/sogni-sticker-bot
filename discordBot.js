@@ -97,7 +97,7 @@ async function processNextRequest(sogni) {
   const { userId, channel, prompt } = requestQueue.shift();
 
   try {
-    const style = 'One big Sticker, thin white outline, cartoon, grey solid background';
+    const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
     const negativePrompt =
       'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';

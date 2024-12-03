@@ -1,3 +1,4 @@
+// telegramBot.js
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const saveFile = require('./lib/saveFile');
@@ -102,7 +103,7 @@ async function processNextRequest(sogni) {
 
     try {
         const prompt = message.text;
-        const style = 'One big Sticker, thin white outline, cartoon, greenscreen background';
+        const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
         const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
         const model = 'flux1-schnell-fp8';
         const batchSize = 3;
@@ -125,8 +126,25 @@ async function processNextRequest(sogni) {
             const imageUrl = images[i];
             const filePath = `renders/${project.id}_${i + 1}.png`;
 
+            // Save the image file
             await saveFile(filePath, imageUrl);
-            const stickerFilePath = await convertImageToSticker(filePath);
+
+            // Remove background from the image
+            let stickerImage;
+            try {
+                stickerImage = await removeImageBg(filePath);
+            } catch (error) {
+                console.error('Error in removeImageBg:', error);
+                bot.sendMessage(chatId, 'An error occurred while removing the background. Please try again.');
+                continue;
+            }
+
+            // Save the background-removed image to a new file
+            const bgRemovedFilePath = filePath.replace('.png', '_nobg.png');
+            await stickerImage.writeAsync(bgRemovedFilePath);
+
+            // Convert the background-removed image to sticker
+            const stickerFilePath = await convertImageToSticker(bgRemovedFilePath);
 
             if (fs.existsSync(stickerFilePath)) {
                 console.log('Generated sticker file path:', stickerFilePath);
