@@ -1,4 +1,7 @@
 // telegramBot.js
+// Purpose: Handles all Telegram bot logic, including receiving messages, managing a request queue, 
+// and processing image generation and sticker creation requests.
+
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const saveFile = require('./lib/saveFile');
@@ -45,17 +48,24 @@ const startTelegramBot = (sogni) => {
         const userId = msg.from.id;
         const userMessage = msg.text && msg.text.toLowerCase();
 
-        if (userMessage && (userMessage.startsWith('hi') || userMessage.startsWith('hello'))) {
+        if (!userMessage) {
+            // If it is not a text message, ignore or let the user know.
+            return;
+        }
+
+        if (userMessage.startsWith('hi') || userMessage.startsWith('hello')) {
             bot.sendMessage(chatId, `Hello, I am Sogni AI sticker bot! Type /start to get started!`);
-        } else if (userMessage && !userMessage.startsWith('/')) {
+        } else if (!userMessage.startsWith('/')) {
             if (pendingUsers.has(userId)) {
-                bot.sendMessage(chatId, `You already have a pending request. Please wait until it's processed.`);
+                // The user already has a pending request, let them know again (user experience improvement)
+                bot.sendMessage(chatId, `You already have a pending request. Please wait until it's processed. Thank you for your patience!`);
                 return;
             }
 
             // Add request to queue
             requestQueue.push({ userId, chatId, message: msg });
             pendingUsers.add(userId);
+            console.log(`Received new request from userId: ${userId}, prompt: "${msg.text}". Queue length is now ${requestQueue.length}.`);
 
             if (isProcessing) {
                 const positionInQueue = requestQueue.findIndex(req => req.userId === userId) + 1;
@@ -64,6 +74,7 @@ const startTelegramBot = (sogni) => {
                 bot.sendMessage(chatId, `Generating stickers for: ${msg.text}`);
             }
 
+            // Start processing queue if not already
             processNextRequest(sogni);
         }
     });
@@ -73,6 +84,9 @@ const startTelegramBot = (sogni) => {
 
 function handlePollingError(error) {
     console.error('Polling error:', error);
+
+    // Additional log for clarity
+    console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
 
     if (retryCount < maxRetries) {
         const backoffTime = Math.pow(2, retryCount) * 1000;
@@ -90,7 +104,10 @@ function handlePollingError(error) {
                 }
             });
             // Restart the bot with the existing sogni instance
-            if (globalSogni) startTelegramBot(globalSogni);
+            if (globalSogni) {
+                console.log('Restarting Telegram bot after polling error...');
+                startTelegramBot(globalSogni);
+            }
         }, backoffTime);
     } else {
         console.error('Max retries reached. Bot is stopping.');
@@ -105,6 +122,7 @@ async function processNextRequest(sogni) {
     isProcessing = true;
 
     const { userId, chatId, message } = requestQueue.shift();
+    console.log(`Processing request for userId: ${userId}, prompt: "${message.text}"`);
 
     try {
         const prompt = message.text;
@@ -125,38 +143,58 @@ async function processNextRequest(sogni) {
             timeStepSpacing: 'Linear'
         });
 
+        console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
+
         const images = await project.waitForCompletion();
+        console.log(`Project ${project.id} completed. Received ${images.length} images.`);
 
         for (let i = 0; i < images.length; i++) {
             const imageUrl = images[i];
             const filePath = `renders/${project.id}_${i + 1}.png`;
 
-            // Save the image file
-            await saveFile(filePath, imageUrl);
-
-            // Remove background from the image
-            let stickerImage;
             try {
-                stickerImage = await removeImageBg(filePath);
-            } catch (error) {
-                console.error('Error in removeImageBg:', error);
-                bot.sendMessage(chatId, 'An error occurred while removing the background. Please try again.');
-                continue;
-            }
+                await saveFile(filePath, imageUrl);
+                console.log(`Saved image to ${filePath}`);
 
-            // Save the background-removed image to a new file
-            const bgRemovedFilePath = filePath.replace('.png', '_nobg.png');
-            await stickerImage.writeAsync(bgRemovedFilePath);
+                // Remove background from the image
+                let stickerImage;
+                try {
+                    stickerImage = await removeImageBg(filePath);
+                } catch (error) {
+                    console.error('Error in removeImageBg:', error);
+                    bot.sendMessage(chatId, 'An error occurred while removing the background. Please try again.');
+                    continue;
+                }
 
-            // Convert the background-removed image to sticker
-            const stickerFilePath = await convertImageToSticker(bgRemovedFilePath);
+                const bgRemovedFilePath = filePath.replace('.png', '_nobg.png');
+                await stickerImage.writeAsync(bgRemovedFilePath);
+                console.log(`Saved background-removed image to ${bgRemovedFilePath}`);
 
-            if (fs.existsSync(stickerFilePath)) {
-                console.log('Generated sticker file path:', stickerFilePath);
-                await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
-            } else {
-                console.error('File not found:', stickerFilePath);
-                bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
+                // Convert the background-removed image to sticker
+                let stickerFilePath;
+                try {
+                    stickerFilePath = await convertImageToSticker(bgRemovedFilePath);
+                    console.log('Generated sticker file path:', stickerFilePath);
+                } catch (conversionError) {
+                    console.error('Error converting image to sticker:', conversionError);
+                    bot.sendMessage(chatId, 'Failed to convert to sticker. Please try again.');
+                    continue;
+                }
+
+                if (fs.existsSync(stickerFilePath)) {
+                    await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath));
+                } else {
+                    console.error('File not found:', stickerFilePath);
+                    bot.sendMessage(chatId, 'Failed to find the generated sticker. Please try again.');
+                }
+
+                // Optionally clean up files if no longer needed:
+                // fs.unlinkSync(filePath);
+                // fs.unlinkSync(bgRemovedFilePath);
+                // fs.unlinkSync(stickerFilePath);
+            } catch (downloadError) {
+                console.error('Error during image download or processing:', downloadError);
+                bot.sendMessage(chatId, 'An error occurred while preparing your sticker. Please try again later.');
             }
         }
 
@@ -167,6 +205,7 @@ async function processNextRequest(sogni) {
     } finally {
         pendingUsers.delete(userId);
         isProcessing = false;
+        console.log(`Finished processing for userId: ${userId}. Queue length is now ${requestQueue.length}.`);
         processNextRequest(sogni);
     }
 }
