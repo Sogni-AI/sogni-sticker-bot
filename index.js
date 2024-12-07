@@ -1,6 +1,5 @@
 require('dotenv').config();
 const fs = require('fs');
-require('dotenv').config();
 
 // Check for required environment variables
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -42,4 +41,7 @@ sogniPromise.then((sogni) => {
         console.log('Starting Discord bot...');
         startDiscordBot(sogni);
     }
+}).catch(error => {
+    console.error('Error initializing sogni', error);
+    process.exit(1);
 });

@@ -30,7 +30,11 @@ let isProcessing = false;
 let retryCount = 0;
 const maxRetries = 5;
 
+let globalSogni = null; // Store sogni instance for reuse after polling errors
+
 const startTelegramBot = (sogni) => {
+    globalSogni = sogni;
+
     bot.onText(/\/start/, (msg) => {
         const chatId = msg.chat.id;
         bot.sendMessage(chatId, 'Good day! What would you like me to create a sticker of?');
@@ -85,7 +89,8 @@ function handlePollingError(error) {
                     }
                 }
             });
-            startTelegramBot(true);
+            // Restart the bot with the existing sogni instance
+            if (globalSogni) startTelegramBot(globalSogni);
         }, backoffTime);
     } else {
         console.error('Max retries reached. Bot is stopping.');
