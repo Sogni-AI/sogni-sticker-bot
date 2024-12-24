@@ -12,7 +12,6 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-//client.on('debug', console.log);
 client.on('warn', console.warn);
 client.on('error', console.error);
 
@@ -23,8 +22,6 @@ let isProcessing = false;
 const startDiscordBot = (sogni) => {
   client.once('ready', () => {
     console.log(`Discord bot logged in as ${client.user.tag}`);
-
-    console.log('client.guilds', client.guilds);
     client.guilds.cache.forEach((guild) => console.log('guilds:', guild.name, guild.id));
   });
 
@@ -96,7 +93,8 @@ async function processNextRequest(sogni) {
 
   const { userId, channel, prompt } = requestQueue.shift();
 
-  try {
+  // Wrap main request logic
+  const handleRequest = async () => {
     const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
     const negativePrompt =
       'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
@@ -145,9 +143,21 @@ async function processNextRequest(sogni) {
     }
 
     channel.send('Here you go! Right-click / long press to save them!');
+  };
+
+  try {
+    // Race main request against a 10-second timeout
+    await Promise.race([
+      handleRequest(),
+      new Promise((_, reject) =>
+        setTimeout(() => {
+          reject(new Error('Timeout exceeded: 10s'));
+        }, 10000)
+      ),
+    ]);
   } catch (error) {
-    console.error('Error processing request:', error);
-    channel.send('An error occurred while processing your request. Please try again.');
+    console.error('Error or timeout processing request:', error);
+    channel.send('Your request took too long (over 10 seconds) and was canceled. Please try again.');
   } finally {
     pendingUsers.delete(userId);
     isProcessing = false;
