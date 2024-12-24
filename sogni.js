@@ -25,6 +25,7 @@ const sogniPromise = SogniClient.createInstance({
 })
 .catch((error) => {
   console.error('Error initializing Sogni API client', error);
+  console.log('error', error);
   process.exit(1);
 });
 
