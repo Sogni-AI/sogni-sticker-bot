@@ -1,5 +1,5 @@
 // telegramBot.js
-// Purpose: Handles all Telegram bot logic, including receiving messages, managing a request queue, 
+// Purpose: Handles all Telegram bot logic, including receiving messages, managing a request queue,
 // and processing image generation and sticker creation requests.
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -57,24 +57,29 @@ const startTelegramBot = (sogni) => {
             bot.sendMessage(chatId, `Hello, I am Sogni AI sticker bot! Type /start to get started!`);
         } else if (!userMessage.startsWith('/')) {
             if (pendingUsers.has(userId)) {
-                // The user already has a pending request, let them know again (user experience improvement)
-                bot.sendMessage(chatId, `You already have a pending request. Please wait until it's processed. Thank you for your patience!`);
+                // The user already has a pending request, let them know
+                bot.sendMessage(
+                    chatId,
+                    `You already have a pending request. Please wait until it's processed. Thank you for your patience!`
+                );
                 return;
             }
 
             // Add request to queue
             requestQueue.push({ userId, chatId, message: msg });
             pendingUsers.add(userId);
-            console.log(`Received new request from userId: ${userId}, prompt: "${msg.text}". Queue length is now ${requestQueue.length}.`);
+            console.log(
+                `Received new request from userId: ${userId}, prompt: "${msg.text}". Queue length is now ${requestQueue.length}.`
+            );
 
             if (isProcessing) {
-                const positionInQueue = requestQueue.findIndex(req => req.userId === userId) + 1;
+                const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
                 bot.sendMessage(chatId, `Your request is queued. You are number ${positionInQueue} in the queue.`);
             } else {
                 bot.sendMessage(chatId, `Generating stickers for: ${msg.text}`);
             }
 
-            // Start processing queue if not already
+            // Start processing the queue if not already
             processNextRequest(sogni);
         }
     });
@@ -124,7 +129,8 @@ async function processNextRequest(sogni) {
     const { userId, chatId, message } = requestQueue.shift();
     console.log(`Processing request for userId: ${userId}, prompt: "${message.text}"`);
 
-    try {
+    // Wrap main processing logic in a function so we can race it against a timeout
+    const handleRequest = async () => {
         const prompt = message.text;
         const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
         const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
@@ -199,9 +205,21 @@ async function processNextRequest(sogni) {
         }
 
         bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them!');
+    };
+
+    try {
+        // Race the main request against a 10-second timeout
+        await Promise.race([
+            handleRequest(),
+            new Promise((_, reject) =>
+                setTimeout(() => {
+                    reject(new Error('Timeout exceeded: 10s'));
+                }, 10000)
+            ),
+        ]);
     } catch (error) {
-        console.error('Error processing request:', error);
-        bot.sendMessage(chatId, 'An error occurred while processing your request. Please try again.');
+        console.error('Error or timeout processing request:', error);
+        bot.sendMessage(chatId, 'Your request took too long (over 10 seconds) and was canceled. Please try again.');
     } finally {
         pendingUsers.delete(userId);
         isProcessing = false;
