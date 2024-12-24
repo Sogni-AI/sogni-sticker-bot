@@ -146,18 +146,18 @@ async function processNextRequest(sogni) {
   };
 
   try {
-    // Race main request against a 10-second timeout
+    // Race main request against a 20-second timeout
     await Promise.race([
       handleRequest(),
       new Promise((_, reject) =>
         setTimeout(() => {
-          reject(new Error('Timeout exceeded: 10s'));
-        }, 10000)
+          reject(new Error('Timeout exceeded: 20s'));
+        }, 20000)
       ),
     ]);
   } catch (error) {
     console.error('Error or timeout processing request:', error);
-    channel.send('Your request took too long (over 10 seconds) and was canceled. Please try again.');
+    channel.send('Your request took too long (over 20 seconds) and was canceled. Please try again.');
   } finally {
     pendingUsers.delete(userId);
     isProcessing = false;
