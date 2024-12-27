@@ -50,13 +50,21 @@ const startTelegramBot = (sogni) => {
 
   bot.on('message', async (msg) => {
     console.log('msg', msg);
+
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     const userMessage = msg.text && msg.text.toLowerCase();
 
+    // Determine if we're in a forum thread (thread mode)
+    const isInThread = (
+      msg.chat.type === 'supergroup' &&
+      msg.chat.is_forum === true && 
+      msg.message_thread_id
+    );
+
     // Prepare options for replying in the same thread if available
     const messageOptions = {};
-    if (msg.chat.type === 'supergroup' && msg.message_thread_id) {
+    if (isInThread) {
       messageOptions.message_thread_id = msg.message_thread_id;
     }
 
@@ -95,6 +103,7 @@ const startTelegramBot = (sogni) => {
       );
 
       if (isProcessing) {
+        // Show the queue position, both in thread and non-thread mode
         const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
         bot.sendMessage(
           chatId,
@@ -102,13 +111,17 @@ const startTelegramBot = (sogni) => {
           messageOptions
         );
       } else {
-        // Show user we're generating
-        const txt = msg.text.replace(/^!generate\s*/i, '').trim();
-        bot.sendMessage(
-          chatId,
-          `Generating stickers for: ${txt}`,
-          messageOptions
-        );
+        // If not already processing, let them know we're generating
+        // But only if we're NOT in thread mode
+        if (!isInThread) {
+          // Remove "!generate" from the beginning for a cleaner prompt display
+          const userPrompt = msg.text.replace(/^!generate\b\s*/i, '').trim();
+          bot.sendMessage(
+            chatId,
+            `Generating stickers for: ${userPrompt}`,
+            messageOptions
+          );
+        }
       }
 
       // Start processing the queue if not already
@@ -163,22 +176,31 @@ async function processNextRequest(sogni) {
     const { userId, chatId, message } = requestQueue.shift();
     console.log(`Processing request for userId: ${userId}, prompt: "${message.text}"`);
 
-    // Grab thread info so we can reply in the correct topic
+    // Again, figure out if we're in a thread for the actual generation step
+    const isInThread = (
+      message.chat.type === 'supergroup' &&
+      message.chat.is_forum === true && 
+      message.message_thread_id
+    );
+
+    // Use threadOptions to send messages back to the same thread
     const threadOptions = {};
-    if (message.chat.type === 'supergroup' && message.message_thread_id) {
+    if (isInThread) {
       threadOptions.message_thread_id = message.message_thread_id;
     }
 
     // Wrap main processing logic in a function so we can race it against a timeout
     const handleRequest = async () => {
-        // We remove '!generate' to isolate the user's prompt text
-        const prompt = message.text.replace(/^!generate\s*/i, '').trim();
-        
+        // We remove '!generate' from the beginning to isolate the user's prompt text
+        const prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
+
+        // If in thread mode, only 1 image; otherwise, 3
+        const batchSize = isInThread ? 1 : 3;
+
         // Example style/negative prompts:
         const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
         const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
         const model = 'flux1-schnell-fp8';
-        const batchSize = 3;
 
         const project = await sogni.projects.create({
             modelId: model,
@@ -243,7 +265,10 @@ async function processNextRequest(sogni) {
             }
         }
 
-        bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them!', threadOptions);
+        // If we are NOT in a thread, send a final note
+        if (!isInThread) {
+          bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them!', threadOptions);
+        }
     };
 
     try {
