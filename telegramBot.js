@@ -58,7 +58,7 @@ const startTelegramBot = (sogni) => {
     // Determine if we're in a forum thread (thread mode)
     const isInThread = (
       msg.chat.type === 'supergroup' &&
-      msg.chat.is_forum === true && 
+      msg.chat.is_forum === true &&
       msg.message_thread_id
     );
 
@@ -76,7 +76,7 @@ const startTelegramBot = (sogni) => {
     // If user says "hi" or "hello", greet them
     if (userMessage.startsWith('hi') || userMessage.startsWith('hello')) {
       bot.sendMessage(
-        chatId, 
+        chatId,
         `Hello, I am Sogni AI sticker bot! Type /start to get started, or use "!generate Your prompt..."!`,
         messageOptions
       );
@@ -179,7 +179,7 @@ async function processNextRequest(sogni) {
     // Again, figure out if we're in a thread for the actual generation step
     const isInThread = (
       message.chat.type === 'supergroup' &&
-      message.chat.is_forum === true && 
+      message.chat.is_forum === true &&
       message.message_thread_id
     );
 
@@ -192,10 +192,32 @@ async function processNextRequest(sogni) {
     // Wrap main processing logic in a function so we can race it against a timeout
     const handleRequest = async () => {
         // We remove '!generate' from the beginning to isolate the user's prompt text
-        const prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
+        let prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
 
-        // If in thread mode, only 1 image; otherwise, 3
-        const batchSize = isInThread ? 1 : 3;
+        // If user is in direct DM (msg.chat.type === 'private') and the prompt ends with a number
+        // in parentheses like (15), then we create that many stickers (up to 16). If above 16, just do 16.
+        // Otherwise, we fall back to existing logic:
+        // - If in thread mode: 1 image
+        // - If not in thread mode: 3 images
+        let batchSize = 3; // default
+        if (isInThread) {
+          // If in thread mode, only 1 image
+          batchSize = 1;
+        }
+
+        // Only do the secret feature if we're in a private chat
+        if (message.chat.type === 'private') {
+          // Look for something like (NN) at the end
+          const match = prompt.match(/\((\d+)\)\s*$/);
+          if (match) {
+            let requestedCount = parseInt(match[1]);
+            // Cap at 16
+            if (requestedCount > 16) requestedCount = 16;
+            batchSize = requestedCount;
+            // Remove the trailing (NN) from the prompt
+            prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
+          }
+        }
 
         // Example style/negative prompts:
         const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
@@ -272,18 +294,31 @@ async function processNextRequest(sogni) {
     };
 
     try {
-        // Race the main request against a 20-second timeout
+        // Race the main request against a 30-second timeout
         await Promise.race([
             handleRequest(),
             new Promise((_, reject) =>
                 setTimeout(() => {
-                    reject(new Error('Timeout exceeded: 20s'));
-                }, 20000)
+                    reject(new Error('Timeout exceeded: 30s'));
+                }, 30000)
             ),
         ]);
     } catch (error) {
+        // Check if we got an "Invalid token" error from the Sogni SDK
+        if (
+          error &&
+          error.status === 401 &&                 // HTTP 401
+          error.payload &&                        // The 'payload' object is present
+          error.payload.errorCode === 107 &&      // Sogni-specific error code
+            /Invalid token/i.test(error.payload.message)
+        ) {
+          console.error('Detected invalid token, restarting process...');
+          // Exit so PM2 can restart
+          process.exit(1);
+        }
+
         console.error('Error or timeout processing request:', error);
-        bot.sendMessage(chatId, 'Your request took too long (over 10 seconds) and was canceled. Please try again.', threadOptions);
+        bot.sendMessage(chatId, 'Your request took too long (over 30 seconds) and was canceled. Please try again.', threadOptions);
     } finally {
         pendingUsers.delete(userId);
         isProcessing = false;
