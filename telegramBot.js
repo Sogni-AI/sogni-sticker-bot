@@ -418,7 +418,7 @@ Blacklist means the prompt must contain none of those words.
    * Handle all incoming messages
    */
   bot.on('message', async (msg) => {
-    console.log('msg', msg);
+    //console.log('msg', msg);
     const chatId = msg.chat.id;
     const userMessage = msg.text && msg.text.toLowerCase();
     if (!userMessage) return;
@@ -610,6 +610,7 @@ async function processNextRequest(sogni) {
       numberOfImages: batchSize,
       scheduler: 'Euler',
       timeStepSpacing: 'Linear'
+      disableSafety: true, // If you want to bypass the NSFW filter, uncomment this
     });
 
     console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
@@ -617,16 +618,29 @@ async function processNextRequest(sogni) {
     const images = await project.waitForCompletion();
     console.log(`Project ${project.id} completed. Received ${images.length} images.`);
 
-    // We'll handle the entire batch with a "10s x numberOfImages" global limit
-    const totalTimeout = batchSize * 10000;
-    await Promise.race([
-      processAllImages(images, project.id, chatId, threadOptions),
-      new Promise((_, reject) =>
-        setTimeout(() => {
-          reject(new Error(`Request took too long: > ${totalTimeout / 1000} seconds in total.`));
-        }, totalTimeout)
-      )
-    ]);
+    // NEW: If 0 images returned, it likely triggered the NSFW filter (all images blocked)
+    if (images.length === 0) {
+      bot.sendMessage(
+        chatId,
+        'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
+        threadOptions
+      );
+      return; 
+    }
+
+    // MOD: If fewer images are returned than requested, at least one was NSFW-filtered out
+    if (images.length < batchSize) {
+      const removedCount = batchSize - images.length;
+      bot.sendMessage(
+        chatId,
+        `We generated ${images.length} out of ${batchSize} images. ` +
+        `${removedCount} image${removedCount > 1 ? 's' : ''} ` +
+        'was removed because it triggered the NSFW filter. Please try again.',
+        threadOptions
+      );
+    }
+
+    await processAllImages(images, project.id, chatId, threadOptions);
 
   } catch (error) {
     // Check for Sogni "Invalid token" error
