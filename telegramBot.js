@@ -610,7 +610,7 @@ async function processNextRequest(sogni) {
       numberOfImages: batchSize,
       scheduler: 'Euler',
       timeStepSpacing: 'Linear'
-      disableSafety: true, // If you want to bypass the NSFW filter, uncomment this
+      //disableSafety: true, // If you want to bypass the NSFW filter, uncomment this
     });
 
     console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
