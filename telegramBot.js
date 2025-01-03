@@ -648,8 +648,7 @@ async function processNextRequest(sogni) {
       error &&
       error.status === 401 &&
       error.payload &&
-      error.payload.errorCode === 107 &&
-      /Invalid token/i.test(error.payload.message)
+      error.payload.errorCode === 107
     ) {
       console.error('Detected invalid token, restarting process...');
       process.exit(1);
