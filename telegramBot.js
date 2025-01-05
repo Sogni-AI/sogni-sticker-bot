@@ -66,7 +66,7 @@ const requestQueue = [];
 const pendingUsers = new Set();
 let isProcessing = false;
 let retryCount = 0;
-const maxRetries = 5;
+const maxRetries = 9999;
 
 let globalSogni = null; // Store sogni instance for reuse after polling errors
 
