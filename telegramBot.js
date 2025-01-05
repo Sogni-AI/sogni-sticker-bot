@@ -580,23 +580,32 @@ async function processNextRequest(sogni) {
       // Remove '!generate' from the beginning
       let prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
 
-      // If user is in private chat and the prompt ends with (NN), create that many
-      let batchSize = 3;
-      const isInThread = threadOptions.message_thread_id !== undefined;
-      if (isInThread) {
-        batchSize = 1; // in thread mode we do 1 image
+      // Decide how many images to generate based on chat type
+      const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
+      let batchSize = 3; // default 3 for private
+
+      // Force 1 if group / supergroup / channel
+      if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
+        batchSize = 1;
       }
 
-      if (message.chat.type === 'private') {
+      // If private, allow user to override with (NN) syntax
+      if (chatType === 'private') {
         const match = prompt.match(/\((\d+)\)\s*$/);
         if (match) {
-          let requestedCount = parseInt(match[1]);
-          if (requestedCount > 16) requestedCount = 16;
+          let requestedCount = parseInt(match[1], 10);
+          if (requestedCount > 16) requestedCount = 16; // limit for safety
           batchSize = requestedCount;
-          // remove the trailing (NN)
+          // remove the trailing (NN) so it doesn't affect prompt text
           prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
         }
       }
+
+      // If you'd also like to force 1 image per forum "topic/thread", uncomment this:
+      // const isInThread = threadOptions.message_thread_id !== undefined;
+      //if (isInThread) {
+      //  batchSize = 1;
+      //}
 
       // Example style/negative prompts:
       const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
@@ -614,7 +623,6 @@ async function processNextRequest(sogni) {
         numberOfImages: batchSize,
         scheduler: 'Euler',
         timeStepSpacing: 'Linear'
-        // disableSafety: true, // If you want to bypass NSFW filter, uncomment
       });
 
       console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
