@@ -17,7 +17,10 @@ const sogniPromise = SogniClient.createInstance({
 
   sogni.apiClient.on('disconnected', ({ code, reason }) => {
     console.error('Disconnected from Sogni API', code, reason);
-    process.exit(1); // Force exit so PM2 restarts
+    console.log('Will attempt to exit in 5 seconds for PM2 to restart...');
+    setTimeout(() => {
+      process.exit(1);
+    }, 5000);
   });
 
   await sogni.account.login(process.env.SOGNI_USERNAME, process.env.SOGNI_PASSWORD);

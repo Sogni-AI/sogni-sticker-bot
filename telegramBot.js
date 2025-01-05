@@ -552,8 +552,10 @@ function handlePollingError(error) {
       }
     }, backoffTime);
   } else {
-    console.error('Max retries reached. Bot is stopping.');
-    process.exit(1);
+    console.error('Max retries reached. Bot is stopping in 5 seconds...');
+    setTimeout(() => {
+      process.exit(1);
+    }, 5000);
   }
 }
 
@@ -650,8 +652,11 @@ async function processNextRequest(sogni) {
       error.payload &&
       error.payload.errorCode === 107
     ) {
-      console.error('Detected invalid token, restarting process...');
-      process.exit(1);
+      console.error('Detected invalid token, restarting process in 5 seconds...');
+      setTimeout(() => {
+        process.exit(1);
+      }, 5000);
+      return;
     }
 
     console.error('Error processing request:', error);
