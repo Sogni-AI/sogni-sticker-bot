@@ -418,7 +418,7 @@ Blacklist means the prompt must contain none of those words.
    * Handle all incoming messages
    */
   bot.on('message', async (msg) => {
-    //console.log('msg', msg);
+    // console.log('msg', msg);
     const chatId = msg.chat.id;
     const userMessage = msg.text && msg.text.toLowerCase();
     if (!userMessage) return;
@@ -559,8 +559,119 @@ function handlePollingError(error) {
   }
 }
 
+async function processNextRequest(sogni) {
+  if (isProcessing) return;
+  if (requestQueue.length === 0) return;
+
+  isProcessing = true;
+
+  const { userId, chatId, message } = requestQueue.shift();
+  console.log(`Processing request for userId: ${userId}, prompt: "${message.text}"`);
+
+  // Wrap the request logic in its own function so we can race it with a timeout
+  const handleSingleRequest = async () => {
+    try {
+      // Use thread-specific reply
+      const threadOptions = getThreadMessageOptions(message);
+
+      // Remove '!generate' from the beginning
+      let prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
+
+      // Decide how many images to generate based on chat type
+      const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
+      let batchSize = 3; // default 3 for private
+
+      // Force 1 if group / supergroup / channel
+      if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
+        batchSize = 1;
+      }
+
+      // If private, allow user to override with (NN) syntax
+      if (chatType === 'private') {
+        const match = prompt.match(/\((\d+)\)\s*$/);
+        if (match) {
+          let requestedCount = parseInt(match[1], 10);
+          if (requestedCount > 16) requestedCount = 16; // limit for safety
+          batchSize = requestedCount;
+          // remove the trailing (NN) so it doesn't affect prompt text
+          prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
+        }
+      }
+
+      // If you'd also like to force 1 image per forum "topic/thread", uncomment this:
+      // const isInThread = threadOptions.message_thread_id !== undefined;
+      //if (isInThread) {
+      //  batchSize = 1;
+      //}
+
+      // Example style/negative prompts:
+      const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
+      const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
+      const model = 'flux1-schnell-fp8';
+
+      // Create the project
+      const project = await sogni.projects.create({
+        modelId: model,
+        positivePrompt: prompt,
+        negativePrompt: negativePrompt,
+        stylePrompt: style,
+        steps: 4,
+        guidance: 1,
+        numberOfImages: batchSize,
+        scheduler: 'Euler',
+        timeStepSpacing: 'Linear'
+      });
+
+      console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
+
+      const images = await project.waitForCompletion();
+      console.log(`Project ${project.id} completed. Received ${images.length} images.`);
+
+      // If 0 images returned, it likely triggered NSFW filter
+      if (images.length === 0) {
+        bot.sendMessage(
+          chatId,
+          'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
+          threadOptions
+        );
+        return;
+      }
+
+      // If fewer images are returned than requested, at least some were NSFW-filtered
+      if (images.length < batchSize) {
+        const removedCount = batchSize - images.length;
+        bot.sendMessage(
+          chatId,
+          `We generated ${images.length} out of ${batchSize} images. ` +
+          `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
+          threadOptions
+        );
+      }
+
+      // process all images
+      await processAllImages(images, project.id, chatId, threadOptions);
+
+    } catch (error) {
+      // Check for Sogni "Invalid token" error
+      if (
+        error &&
+        error.status === 401 &&
+        error.payload &&
+        error.payload.errorCode === 107
+      ) {
+        console.error('Detected invalid token, restarting process...');
+        process.exit(1);
+      }
+
+      console.error('Error processing request:', error);
+      bot.sendMessage(chatId, 'An error occurred. Please try again later.');
+    }
+  };
+
 /**
  * Processes the next request in the queue (FIFO).
+ * Now includes a 30-second total timeout so that each user's prompt
+ * won't block the queue forever if something is stuck.
  */
 async function processNextRequest(sogni) {
   if (isProcessing) return;
@@ -571,176 +682,126 @@ async function processNextRequest(sogni) {
   const { userId, chatId, message } = requestQueue.shift();
   console.log(`Processing request for userId: ${userId}, prompt: "${message.text}"`);
 
-  try {
-    // Use thread-specific reply
-    const threadOptions = getThreadMessageOptions(message);
-
-    // Remove '!generate' from the beginning
-    let prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
-
-    // If user is in private chat and the prompt ends with (NN), create that many
-    let batchSize = 3;
-    const isInThread = threadOptions.message_thread_id !== undefined;
-    if (isInThread) {
-      batchSize = 1; // in thread mode we do 1 image
-    }
-
-    if (message.chat.type === 'private') {
-      const match = prompt.match(/\((\d+)\)\s*$/);
-      if (match) {
-        let requestedCount = parseInt(match[1]);
-        if (requestedCount > 16) requestedCount = 16;
-        batchSize = requestedCount;
-        // remove the trailing (NN)
-        prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
-      }
-    }
-
-    // Example style/negative prompts:
-    const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
-    const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
-    const model = 'flux1-schnell-fp8';
-
-    // Create the project
-    const project = await sogni.projects.create({
-      modelId: model,
-      positivePrompt: prompt,
-      negativePrompt: negativePrompt,
-      stylePrompt: style,
-      steps: 4,
-      guidance: 1,
-      numberOfImages: batchSize,
-      scheduler: 'Euler',
-      timeStepSpacing: 'Linear'
-      //disableSafety: true, // If you want to bypass the NSFW filter, uncomment this
-    });
-
-    console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
-
-    const images = await project.waitForCompletion();
-    console.log(`Project ${project.id} completed. Received ${images.length} images.`);
-
-    // NEW: If 0 images returned, it likely triggered the NSFW filter (all images blocked)
-    if (images.length === 0) {
-      bot.sendMessage(
-        chatId,
-        'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
-        threadOptions
-      );
-      return; 
-    }
-
-    // MOD: If fewer images are returned than requested, at least one was NSFW-filtered out
-    if (images.length < batchSize) {
-      const removedCount = batchSize - images.length;
-      bot.sendMessage(
-        chatId,
-        `We generated ${images.length} out of ${batchSize} images. ` +
-        `${removedCount} image${removedCount > 1 ? 's' : ''} ` +
-        'was removed because it triggered the NSFW filter. Please try again.',
-        threadOptions
-      );
-    }
-
-    await processAllImages(images, project.id, chatId, threadOptions);
-
-  } catch (error) {
-    // Check for Sogni "Invalid token" error
-    if (
-      error &&
-      error.status === 401 &&
-      error.payload &&
-      error.payload.errorCode === 107
-    ) {
-      console.error('Detected invalid token, restarting process in 5 seconds...');
-      setTimeout(() => {
-        process.exit(1);
-      }, 5000);
-      return;
-    }
-
-    console.error('Error processing request:', error);
-    bot.sendMessage(chatId, 'An error occurred. Please try again later.');
-  } finally {
-    pendingUsers.delete(userId);
-    isProcessing = false;
-    console.log(`Finished processing for userId: ${userId}. Queue length is now ${requestQueue.length}.`);
-    processNextRequest(sogni);
-  }
-}
-
-/**
- * Processes all images but enforces a 30-second timeout for each image individually.
- * If an image hits 30 seconds, we skip it, but continue processing the rest.
- */
-async function processAllImages(images, projectId, chatId, threadOptions) {
-  for (let i = 0; i < images.length; i++) {
+  // We'll wrap the actual request logic in its own function,
+  // so we can race it against a 30-second timeout below.
+  const handleSingleRequest = async () => {
     try {
-      await Promise.race([
-        processSingleImage(images[i], projectId, i, chatId, threadOptions),
-        new Promise((_, reject) =>
-          setTimeout(() => {
-            reject(new Error(`Timeout exceeded: 30s for image #${i + 1}`));
-          }, 30000)
-        )
-      ]);
+      // Use thread-specific reply
+      const threadOptions = getThreadMessageOptions(message);
+
+      // Remove '!generate' from the beginning
+      let prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
+
+      // Decide how many images to generate based on chat type
+      const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
+      let batchSize = 3; // default 3 for private
+
+      // Force 1 if group / supergroup / channel
+      if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
+        batchSize = 1;
+      }
+
+      // If private, allow user to override with (NN) syntax
+      if (chatType === 'private') {
+        const match = prompt.match(/\((\d+)\)\s*$/);
+        if (match) {
+          let requestedCount = parseInt(match[1], 10);
+          if (requestedCount > 16) requestedCount = 16; // limit for safety
+          batchSize = requestedCount;
+          // remove the trailing (NN)
+          prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
+        }
+      }
+
+      // Example style/negative prompts:
+      const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
+      const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
+      const model = 'flux1-schnell-fp8';
+
+      // Create the project
+      const project = await sogni.projects.create({
+        modelId: model,
+        positivePrompt: prompt,
+        negativePrompt: negativePrompt,
+        stylePrompt: style,
+        steps: 4,
+        guidance: 1,
+        numberOfImages: batchSize,
+        scheduler: 'Euler',
+        timeStepSpacing: 'Linear'
+        //disableSafety: true, // If you want to bypass the NSFW filter, uncomment this
+      });
+
+      console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
+
+      const images = await project.waitForCompletion();
+      console.log(`Project ${project.id} completed. Received ${images.length} images.`);
+
+      // If 0 images returned, it likely triggered NSFW filter
+      if (images.length === 0) {
+        bot.sendMessage(
+          chatId,
+          'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
+          threadOptions
+        );
+        return;
+      }
+
+      // If fewer images returned than requested, at least some were NSFW-filtered
+      if (images.length < batchSize) {
+        const removedCount = batchSize - images.length;
+        bot.sendMessage(
+          chatId,
+          `We generated ${images.length} out of ${batchSize} images. ` +
+          `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
+          threadOptions
+        );
+      }
+
+      // Process all images
+      await processAllImages(images, project.id, chatId, threadOptions);
+
     } catch (error) {
-      console.error(`Error or timeout during image #${i + 1}:`, error);
-      bot.sendMessage(
-        chatId,
-        `Image #${i + 1} took too long or failed to process. Skipping it...`,
-        threadOptions
-      );
-      continue;
+      // Check for Sogni "Invalid token" error
+      if (
+        error &&
+        error.status === 401 &&
+        error.payload &&
+        error.payload.errorCode === 107
+      ) {
+        console.error('Detected invalid token, restarting process in 5 seconds...');
+        setTimeout(() => {
+          process.exit(1);
+        }, 5000);
+        return;
+      }
+
+      console.error('Error processing request:', error);
+      bot.sendMessage(chatId, 'An error occurred. Please try again later.');
     }
-  }
+  };
 
-  // If we are NOT in a thread, send a final note
-  if (!threadOptions.message_thread_id) {
-    bot.sendMessage(chatId, 'Here you go! Right-click / long press to save them!', threadOptions);
-  }
+  // Race the single-request logic against a 30-second timeout
+  Promise.race([
+    handleSingleRequest(),
+    new Promise((_, reject) =>
+      setTimeout(() => {
+        reject(new Error('Queue request timed out after 30s'));
+      }, 30000)
+    )
+  ])
+    .then(() => {
+      console.log('Request completed or timed out for userId:', userId);
+    })
+    .catch((err) => {
+      console.error('Error or timeout while processing the request:', err);
+      bot.sendMessage(chatId, 'Sorry, your request took too long. Skipping...');
+    })
+    .finally(() => {
+      // Clean up and move on
+      pendingUsers.delete(userId);
+      isProcessing = false;
+      console.log(`Finished processing for userId: ${userId}. Queue length is now ${requestQueue.length}.`);
+      processNextRequest(sogni);
+    });
 }
-
-/**
- * Process a single image:
- *  1. Download it
- *  2. Remove background
- *  3. Convert to sticker
- *  4. Send to chat
- */
-async function processSingleImage(imageUrl, projectId, idx, chatId, threadOptions) {
-  const filePath = `renders/${projectId}_${idx + 1}.png`;
-
-  // Save to disk
-  await saveFile(filePath, imageUrl);
-  console.log(`Saved image to ${filePath}`);
-
-  // Remove background
-  let stickerImage;
-  try {
-    stickerImage = await removeImageBg(filePath);
-  } catch (error) {
-    throw new Error(`removeImageBg failed: ${error.message || error}`);
-  }
-
-  const bgRemovedFilePath = filePath.replace('.png', '_nobg.png');
-  await stickerImage.writeAsync(bgRemovedFilePath);
-  console.log(`Saved background-removed image to ${bgRemovedFilePath}`);
-
-  // Convert to sticker
-  let stickerFilePath;
-  try {
-    stickerFilePath = await convertImageToSticker(bgRemovedFilePath);
-    console.log('Generated sticker file path:', stickerFilePath);
-  } catch (conversionError) {
-    throw new Error(`convertImageToSticker failed: ${conversionError.message || conversionError}`);
-  }
-
-  if (fs.existsSync(stickerFilePath)) {
-    await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath), threadOptions);
-  } else {
-    throw new Error(`Sticker file not found: ${stickerFilePath}`);
-  }
-}
-
-module.exports = startTelegramBot;
