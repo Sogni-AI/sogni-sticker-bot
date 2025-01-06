@@ -70,6 +70,9 @@ const maxRetries = 9999;
 
 let globalSogni = null; // Store sogni instance for reuse after polling errors
 
+// Keep track of each user's last prompt so we can handle "!repeat"
+const userLastPrompt = {};
+
 // Load the channel config once at startup
 let channelConfig = loadChannelConfig();
 
@@ -161,6 +164,7 @@ const startTelegramBot = (sogni) => {
 - **/help** - Show this help message
 - **/start** - Basic start message
 - **!generate <prompt>** - Generate stickers
+- **!repeat** - Generate more images with your last prompt
 
 - **/addwhitelist** - Add comma-separated words to this channel's whitelist (admin-only)
 - **/addblacklist** - Add comma-separated words to this channel's blacklist (admin-only)
@@ -452,7 +456,47 @@ Blacklist means the prompt must contain none of those words.
       return;
     }
 
-    // 2) Only handle generation if it starts with "!generate"
+    // 2) If user wants to repeat last prompt: "!repeat"
+    if (userMessage.startsWith('!repeat')) {
+      const userId = msg.from.id;
+      const lastPrompt = userLastPrompt[userId];
+      if (!lastPrompt) {
+        bot.sendMessage(chatId, 'No last prompt found. Please use "!generate <prompt>" first.', messageOptions);
+        return;
+      }
+      // Queue a new request with the stored prompt
+      if (pendingUsers.has(userId)) {
+        bot.sendMessage(
+          chatId,
+          'You already have a pending request. Please wait until it is processed.',
+          messageOptions
+        );
+        return;
+      }
+
+      requestQueue.push({ userId, chatId, message: msg, repeatedPrompt: lastPrompt });
+      pendingUsers.add(userId);
+
+      if (isProcessing) {
+        const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
+        bot.sendMessage(
+          chatId,
+          `Your repeat request is queued. You are number ${positionInQueue} in the queue.`,
+          messageOptions
+        );
+      } else {
+        bot.sendMessage(
+          chatId,
+          `Generating stickers for (repeat): ${lastPrompt}`,
+          messageOptions
+        );
+      }
+
+      processNextRequest(globalSogni);
+      return;
+    }
+
+    // 3) Only handle generation if it starts with "!generate"
     if (userMessage.startsWith('!generate')) {
       // If we are in a group / supergroup, check whitelist/blacklist
       if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
@@ -515,10 +559,11 @@ Blacklist means the prompt must contain none of those words.
       }
 
       // Start processing if not already
-      processNextRequest(sogni);
+      processNextRequest(globalSogni);
+      return;
     }
 
-    // If it doesn't start with '!generate' or greet the bot, do nothing else.
+    // If it doesn't start with '!generate', '!repeat', or greet the bot, do nothing else.
   });
 
   bot.on('polling_error', handlePollingError);
@@ -570,8 +615,9 @@ async function processNextRequest(sogni) {
 
   isProcessing = true;
 
-  const { userId, chatId, message } = requestQueue.shift();
-  console.log(`Processing request for userId: ${userId}, prompt: "${message.text}"`);
+  const { userId, chatId, message, repeatedPrompt } = requestQueue.shift();
+  const rawText = message.text || '';
+  console.log(`Processing request for userId: ${userId}, message: "${rawText}"`);
 
   // We'll wrap the actual request logic in its own function,
   // so we can race it against a 30-second timeout below.
@@ -580,8 +626,13 @@ async function processNextRequest(sogni) {
       // Use thread-specific reply
       const threadOptions = getThreadMessageOptions(message);
 
-      // Remove '!generate' from the beginning
-      let prompt = message.text.replace(/^!generate\b\s*/i, '').trim();
+      // Remove '!generate' from the beginning, if present
+      let prompt = repeatedPrompt
+        ? repeatedPrompt
+        : rawText.replace(/^!generate\b\s*/i, '').trim();
+
+      // Store this prompt as the last prompt for user
+      userLastPrompt[userId] = prompt;
 
       // Decide how many images to generate based on chat type
       const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
@@ -609,26 +660,40 @@ async function processNextRequest(sogni) {
       const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
       const model = 'flux1-schnell-fp8';
 
-      // Create the project
-      const project = await sogni.projects.create({
-        modelId: model,
-        positivePrompt: prompt,
-        negativePrompt: negativePrompt,
-        stylePrompt: style,
-        steps: 4,
-        guidance: 1,
-        numberOfImages: batchSize,
-        scheduler: 'Euler',
-        timeStepSpacing: 'Linear'
-        //disableSafety: true, // If you want to bypass the NSFW filter, uncomment this
-      });
+      // Attempt up to 2 times if we get 0 images (NSFW filter false positive)
+      let images = [];
+      const maxNsfwRetries = 2;
+      for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
+        // Create the project
+        let project = await sogni.projects.create({
+          modelId: model,
+          positivePrompt: prompt,
+          negativePrompt: negativePrompt,
+          stylePrompt: style,
+          steps: 4,
+          guidance: 1,
+          numberOfImages: batchSize,
+          scheduler: 'Euler',
+          timeStepSpacing: 'Linear'
+          // disableSafety: true, // enable if you want to bypass NSFW checks
+        });
 
-      console.log(`Project created: ${project.id} for prompt: "${prompt}"`);
+        console.log(`Project created (attempt ${attempt}): ${project.id} for prompt: "${prompt}"`);
+        images = await project.waitForCompletion();
+        console.log(`Project ${project.id} completed. Received ${images.length} images.`);
 
-      const images = await project.waitForCompletion();
-      console.log(`Project ${project.id} completed. Received ${images.length} images.`);
+        if (images.length === 0 && attempt < maxNsfwRetries) {
+          console.log(
+            `No images returned (likely NSFW filter). Retrying attempt ${attempt + 1}...`
+          );
+          continue;
+        } else {
+          // Either we got images, or we've reached the final attempt
+          break;
+        }
+      }
 
-      // If 0 images returned, it likely triggered NSFW filter
+      // If 0 images returned after all attempts, likely truly blocked by NSFW
       if (images.length === 0) {
         bot.sendMessage(
           chatId,
@@ -650,7 +715,7 @@ async function processNextRequest(sogni) {
       }
 
       // Process all images
-      await processAllImages(images, project.id, chatId, threadOptions);
+      await processAllImages(images, chatId, threadOptions);
 
     } catch (error) {
       // Check for Sogni "Invalid token" error
@@ -701,11 +766,11 @@ async function processNextRequest(sogni) {
  * Processes all images but enforces a 30-second timeout for each image individually.
  * If an image hits 30 seconds, we skip it, but continue processing the rest.
  */
-async function processAllImages(images, projectId, chatId, threadOptions) {
+async function processAllImages(images, chatId, threadOptions) {
   for (let i = 0; i < images.length; i++) {
     try {
       await Promise.race([
-        processSingleImage(images[i], projectId, i, chatId, threadOptions),
+        processSingleImage(images[i], i, chatId, threadOptions),
         new Promise((_, reject) =>
           setTimeout(() => {
             reject(new Error(`Timeout exceeded: 30s for image #${i + 1}`));
@@ -736,8 +801,8 @@ async function processAllImages(images, projectId, chatId, threadOptions) {
  *  3. Convert to sticker
  *  4. Send to chat
  */
-async function processSingleImage(imageUrl, projectId, idx, chatId, threadOptions) {
-  const filePath = `renders/${projectId}_${idx + 1}.png`;
+async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
+  const filePath = `renders/telegram_${Date.now()}_${idx + 1}.png`;
 
   // Save to disk
   await saveFile(filePath, imageUrl);

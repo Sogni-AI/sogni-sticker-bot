@@ -1,3 +1,4 @@
+// discordBot.js
 const { Client, GatewayIntentBits, AttachmentBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -19,6 +20,13 @@ const requestQueue = [];
 const pendingUsers = new Set();
 let isProcessing = false;
 
+// Keep track of each user's last prompt so we can handle "!repeat"
+const lastPromptByUser = {};
+
+/**
+ * Start the Discord Bot
+ * @param sogni
+ */
 const startDiscordBot = (sogni) => {
   client.once('ready', () => {
     console.log(`Discord bot logged in as ${client.user.tag}`);
@@ -45,9 +53,20 @@ const startDiscordBot = (sogni) => {
 
     const userId = message.author.id;
 
+    // ---- Handle commands ----
     if (command === 'start') {
       message.channel.send('Good day! Use `!generate [your prompt]` to create an image.');
-    } else if (command === 'generate') {
+    }
+    else if (command === 'help') {
+      message.channel.send(
+        'Available commands:\n' +
+          '`!start` - Start interaction with the bot.\n' +
+          '`!generate [prompt]` - Generate images.\n' +
+          '`!repeat` - Generate more images with your last prompt.\n' +
+          '`!help` - Show this help message.'
+      );
+    }
+    else if (command === 'generate') {
       const prompt = args.join(' ');
       if (!prompt) {
         message.channel.send('Please provide a prompt. Usage: `!generate [your prompt]`');
@@ -59,6 +78,10 @@ const startDiscordBot = (sogni) => {
         return;
       }
 
+      // Save last prompt for this user
+      lastPromptByUser[userId] = prompt;
+
+      // Queue request
       requestQueue.push({ userId, channel: message.channel, prompt });
       pendingUsers.add(userId);
 
@@ -70,14 +93,33 @@ const startDiscordBot = (sogni) => {
       }
 
       processNextRequest(sogni);
-    } else if (command === 'help') {
-      message.channel.send(
-        'Available commands:\n' +
-          '`!start` - Start interaction with the bot.\n' +
-          '`!generate [prompt]` - Generate an image.\n' +
-          '`!help` - Show this help message.'
-      );
-    } else {
+    }
+    else if (command === 'repeat') {
+      // Use the last prompt
+      const lastPrompt = lastPromptByUser[userId];
+      if (!lastPrompt) {
+        message.channel.send('No last prompt found. Please use `!generate [your prompt]` first.');
+        return;
+      }
+
+      if (pendingUsers.has(userId)) {
+        message.channel.send('You already have a pending request. Please wait until it’s processed.');
+        return;
+      }
+
+      requestQueue.push({ userId, channel: message.channel, prompt: lastPrompt });
+      pendingUsers.add(userId);
+
+      if (isProcessing) {
+        const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
+        message.channel.send(`Your repeat request is queued. You are number ${positionInQueue} in the queue.`);
+      } else {
+        message.channel.send(`Generating images for (repeat): ${lastPrompt}`);
+      }
+
+      processNextRequest(sogni);
+    }
+    else {
       message.channel.send('Unknown command. Use `!help` to see available commands.');
     }
   });
@@ -95,51 +137,63 @@ async function processNextRequest(sogni) {
 
   // Wrap main request logic
   const handleRequest = async () => {
+    // We’ll use the same prompt each attempt if the NSFW filter zeroes out
     const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
     const negativePrompt =
       'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
     const batchSize = 1;
 
-    const project = await sogni.projects.create({
-      modelId: model,
-      positivePrompt: prompt,
-      negativePrompt: negativePrompt,
-      stylePrompt: style,
-      steps: 4,
-      guidance: 1,
-      numberOfImages: batchSize,
-      scheduler: 'Euler',
-      timeStepSpacing: 'Linear',
-    });
+    let images = [];
+    const maxNsfwRetries = 2;
 
-    const images = await project.waitForCompletion();
+    for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
+      // Create the project
+      let project = await sogni.projects.create({
+        modelId: model,
+        positivePrompt: prompt,
+        negativePrompt: negativePrompt,
+        stylePrompt: style,
+        steps: 4,
+        guidance: 1,
+        numberOfImages: batchSize,
+        scheduler: 'Euler',
+        timeStepSpacing: 'Linear',
+      });
 
-    for (let i = 0; i < images.length; i++) {
-      const imageUrl = images[i];
-      const filePath = path.join(__dirname, 'renders', `${project.id}_${i + 1}.png`);
+      channel.send(`**Attempt ${attempt}**: Generating...`);
+      images = await project.waitForCompletion();
 
-      // Save the image file
-      await saveFile(filePath, imageUrl);
-
-      // Remove background from the image
-      let stickerImage;
-      try {
-        stickerImage = await removeImageBg(filePath);
-      } catch (error) {
-        console.error('Error in removeImageBg:', error);
-        channel.send('An error occurred while removing the background. Please try again.');
+      if (images.length === 0 && attempt < maxNsfwRetries) {
+        channel.send(
+          'No images generated — possibly NSFW filter false positive. Retrying...'
+        );
         continue;
+      } else {
+        break; // we either have images or we’re at the final attempt
       }
+    }
 
-      // Get image buffer from Jimp object
-      const imageBuffer = await stickerImage.getBufferAsync('image/png');
+    // If 0 images returned after all attempts, truly blocked by NSFW
+    if (images.length === 0) {
+      channel.send(
+        'No images were generated (NSFW filter). Please try a safer prompt!'
+      );
+      return;
+    }
 
-      // Create an attachment from the buffer
-      const attachment = new AttachmentBuilder(imageBuffer, { name: `sogni_sticker_${i + 1}.png` });
+    // If fewer images returned, some were removed by NSFW filter
+    if (images.length < batchSize) {
+      const removedCount = batchSize - images.length;
+      channel.send(
+        `Generated ${images.length} out of ${batchSize} image(s). ` +
+        `${removedCount} was removed by the NSFW filter.`
+      );
+    }
 
-      // Send the attachment
-      await channel.send({ files: [attachment] });
+    // For each image, remove background and send to Discord
+    for (let i = 0; i < images.length; i++) {
+      await processImage(images[i], channel, i);
     }
 
     channel.send('Here you go! Right-click / long press to save them!');
@@ -162,6 +216,37 @@ async function processNextRequest(sogni) {
     pendingUsers.delete(userId);
     isProcessing = false;
     processNextRequest(sogni);
+  }
+}
+
+async function processImage(imageUrl, channel, idx) {
+  try {
+    const filePath = path.join(__dirname, 'renders', `discord_${Date.now()}_${idx + 1}.png`);
+
+    // Save the image file
+    await saveFile(filePath, imageUrl);
+
+    // Remove background from the image
+    let stickerImage;
+    try {
+      stickerImage = await removeImageBg(filePath);
+    } catch (error) {
+      console.error('Error in removeImageBg:', error);
+      channel.send('An error occurred while removing the background from an image. Skipping this one.');
+      return;
+    }
+
+    // Get image buffer from Jimp object
+    const imageBuffer = await stickerImage.getBufferAsync('image/png');
+
+    // Create an attachment from the buffer
+    const attachment = new AttachmentBuilder(imageBuffer, { name: `sogni_sticker_${idx + 1}.png` });
+
+    // Send the attachment
+    await channel.send({ files: [attachment] });
+  } catch (err) {
+    console.error('Error processing image:', err);
+    channel.send('Error occurred while processing an image. Skipping...');
   }
 }
 
