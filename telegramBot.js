@@ -487,7 +487,7 @@ Blacklist means the prompt must contain none of those words.
       } else {
         bot.sendMessage(
           chatId,
-          `Generating stickers for (repeat): ${lastPrompt}`,
+          `Generating stickers for: ${lastPrompt} [repeat]`,
           messageOptions
         );
       }

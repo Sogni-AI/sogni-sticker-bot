@@ -114,7 +114,7 @@ const startDiscordBot = (sogni) => {
         const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
         message.channel.send(`Your repeat request is queued. You are number ${positionInQueue} in the queue.`);
       } else {
-        message.channel.send(`Generating images for (repeat): ${lastPrompt}`);
+        message.channel.send(`Generating images for: ${lastPrompt} [repeat]`);
       }
 
       processNextRequest(sogni);
@@ -161,7 +161,12 @@ async function processNextRequest(sogni) {
         timeStepSpacing: 'Linear',
       });
 
-      channel.send(`**Attempt ${attempt}**: Generating...`);
+      if (attempt>1){
+        channel.send(`**Attempt ${attempt}**: Generating...`);
+      }else{
+        channel.send(`Generating...`);
+      }
+
       images = await project.waitForCompletion();
 
       if (images.length === 0 && attempt < maxNsfwRetries) {
