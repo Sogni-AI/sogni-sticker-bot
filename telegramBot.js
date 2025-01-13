@@ -1,6 +1,6 @@
 // telegramBot.js
-// Purpose: Handles all Telegram bot logic, including receiving messages, managing a request queue,
-// and processing image generation and sticker creation requests.
+// Purpose: Handles all Telegram bot logic, including receiving messages, processing image generation,
+// and sticker creation requests. Queue logic has been removed so multiple requests can process at once.
 
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
@@ -61,20 +61,18 @@ bot.getMe().then((info) => {
   console.log('Bot username:', botUsername);
 });
 
-// Initialize the request queue and pending users
-const requestQueue = [];
-const pendingUsers = new Set();
-let isProcessing = false;
-let retryCount = 0;
-const maxRetries = 9999;
-
-let globalSogni = null; // Store sogni instance for reuse after polling errors
-
 // Keep track of each user's last prompt so we can handle "!repeat"
 const userLastPrompt = {};
 
 // Load the channel config once at startup
 let channelConfig = loadChannelConfig();
+
+// We’ll store the sogni instance globally so we can refer to it in handlers
+let globalSogni = null;
+
+// Retry logic for polling errors
+let retryCount = 0;
+const maxRetries = 9999;
 
 /**
  * Utility: Check if user is channel admin or creator
@@ -464,35 +462,10 @@ Blacklist means the prompt must contain none of those words.
         bot.sendMessage(chatId, 'No last prompt found. Please use "!generate <prompt>" first.', messageOptions);
         return;
       }
-      // Queue a new request with the stored prompt
-      if (pendingUsers.has(userId)) {
-        bot.sendMessage(
-          chatId,
-          'You already have a pending request. Please wait until it is processed.',
-          messageOptions
-        );
-        return;
-      }
 
-      requestQueue.push({ userId, chatId, message: msg, repeatedPrompt: lastPrompt });
-      pendingUsers.add(userId);
-
-      if (isProcessing) {
-        const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
-        bot.sendMessage(
-          chatId,
-          `Your repeat request is queued. You are number ${positionInQueue} in the queue.`,
-          messageOptions
-        );
-      } else {
-        bot.sendMessage(
-          chatId,
-          `Generating stickers for: ${lastPrompt} [repeat]`,
-          messageOptions
-        );
-      }
-
-      processNextRequest(globalSogni);
+      // Immediately process the request (no queue).
+      bot.sendMessage(chatId, `Generating stickers for: ${lastPrompt} [repeat]`, messageOptions);
+      handleGenerationRequest(msg, lastPrompt);
       return;
     }
 
@@ -523,43 +496,12 @@ Blacklist means the prompt must contain none of those words.
         }
       }
 
-      // Check if user already has a pending request
-      const userId = msg.from.id;
-      if (pendingUsers.has(userId)) {
-        bot.sendMessage(
-          chatId,
-          `You already have a pending request. Please wait until it's processed. Thank you for your patience!`,
-          messageOptions
-        );
-        return;
-      }
+      // Strip out "!generate" and get the prompt
+      const userPrompt = msg.text.replace(/^!generate\b\s*/i, '').trim();
+      bot.sendMessage(chatId, `Generating stickers for: ${userPrompt}`, messageOptions);
 
-      // Add request to queue
-      requestQueue.push({ userId, chatId, message: msg });
-      pendingUsers.add(userId);
-      console.log(
-        `Received new request from userId: ${userId}, prompt: "${msg.text}". Queue length is now ${requestQueue.length}.`
-      );
-
-      // Let them know queue position or generating
-      if (isProcessing) {
-        const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
-        bot.sendMessage(
-          chatId,
-          `Your request is queued. You are number ${positionInQueue} in the queue.`,
-          messageOptions
-        );
-      } else {
-        const userPrompt = msg.text.replace(/^!generate\b\s*/i, '').trim();
-        bot.sendMessage(
-          chatId,
-          `Generating stickers for: ${userPrompt}`,
-          messageOptions
-        );
-      }
-
-      // Start processing if not already
-      processNextRequest(globalSogni);
+      // Immediately process the request (no queue).
+      handleGenerationRequest(msg, userPrompt);
       return;
     }
 
@@ -569,228 +511,157 @@ Blacklist means the prompt must contain none of those words.
   bot.on('polling_error', handlePollingError);
 };
 
-function handlePollingError(error) {
-  console.error('Polling error:', error);
+/**
+ * Perform the actual generation and sticker processing for a single request.
+ * This used to be queued, but now is run immediately for concurrency.
+ */
+async function handleGenerationRequest(msg, prompt) {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const messageOptions = getThreadMessageOptions(msg);
 
-  // Additional log for clarity
-  console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
+  // Store this prompt as the last prompt for user
+  userLastPrompt[userId] = prompt;
 
-  if (retryCount < maxRetries) {
-    const backoffTime = Math.pow(2, retryCount) * 1000;
-    console.log(`Retrying in ${backoffTime / 1000} seconds... (attempt ${retryCount + 1})`);
+  // Decide how many images to generate based on chat type
+  const chatType = msg.chat.type; // "private" | "group" | "supergroup" | "channel"
+  let batchSize = 3; // default 3 for private
 
-    setTimeout(() => {
-      retryCount++;
-      bot = new TelegramBot(token, {
-        polling: true,
-        request: {
-          agentOptions: {
-            keepAlive: true,
-            family: 4
-          }
-        }
-      });
-      // Restart the bot with the existing sogni instance
-      if (globalSogni) {
-        console.log('Restarting Telegram bot after polling error...');
-        startTelegramBot(globalSogni);
-      }
-    }, backoffTime);
-  } else {
-    console.error('Max retries reached. Bot is stopping in 5 seconds...');
-    setTimeout(() => {
-      process.exit(1);
-    }, 5000);
+  // Force 1 if group / supergroup / channel
+  if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
+    batchSize = 1;
+  }
+
+  // If private, allow user to override with (NN) syntax
+  if (chatType === 'private') {
+    const match = prompt.match(/\((\d+)\)\s*$/);
+    if (match) {
+      let requestedCount = parseInt(match[1], 10);
+      if (requestedCount > 16) requestedCount = 16; // limit for safety
+      batchSize = requestedCount;
+      // remove the trailing (NN)
+      prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
+    }
+  }
+
+  // We'll wrap the generation logic in a promise.race to enforce a 30-second timeout
+  try {
+    await Promise.race([
+      performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions),
+      new Promise((_, reject) =>
+        setTimeout(() => {
+          reject(new Error('Request timed out after 30s'));
+        }, 30000)
+      )
+    ]);
+  } catch (err) {
+    console.error('Error or timeout while processing generation request:', err);
+    bot.sendMessage(chatId, 'Sorry, your request took too long or encountered an error. Please try again.', messageOptions);
   }
 }
 
 /**
- * Processes the next request in the queue (FIFO).
- * Now includes a 30-second total timeout so that each user's prompt
- * won't block the queue forever if something is stuck.
+ * Actually talk to Sogni, get images, and process them into stickers.
  */
-async function processNextRequest(sogni) {
-  if (isProcessing) return;
-  if (requestQueue.length === 0) return;
+async function performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions) {
+  const chatId = msg.chat.id;
+  try {
+    const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
+    const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
+    const model = 'flux1-schnell-fp8';
 
-  isProcessing = true;
+    let images = [];
+    const maxNsfwRetries = 2;
+    for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
+      // Create the project
+      let project = await globalSogni.projects.create({
+        modelId: model,
+        positivePrompt: prompt,
+        negativePrompt: negativePrompt,
+        stylePrompt: style,
+        steps: 4,
+        guidance: 1,
+        numberOfImages: batchSize,
+        scheduler: 'Euler',
+        timeStepSpacing: 'Linear'
+      });
 
-  const { userId, chatId, message, repeatedPrompt } = requestQueue.shift();
-  const rawText = message.text || '';
-  console.log(`Processing request for userId: ${userId}, message: "${rawText}"`);
+      console.log(`Project created (attempt ${attempt}): ${project.id} for prompt: "${prompt}"`);
+      images = await project.waitForCompletion();
+      console.log(`Project ${project.id} completed. Received ${images.length} images.`);
 
-  // We'll wrap the actual request logic in its own function,
-  // so we can race it against a 30-second timeout below.
-  const handleSingleRequest = async () => {
-    try {
-      // Use thread-specific reply
-      const threadOptions = getThreadMessageOptions(message);
-
-      // Remove '!generate' from the beginning, if present
-      let prompt = repeatedPrompt
-        ? repeatedPrompt
-        : rawText.replace(/^!generate\b\s*/i, '').trim();
-
-      // Store this prompt as the last prompt for user
-      userLastPrompt[userId] = prompt;
-
-      // Decide how many images to generate based on chat type
-      const chatType = message.chat.type; // "private" | "group" | "supergroup" | "channel"
-      let batchSize = 3; // default 3 for private
-
-      // Force 1 if group / supergroup / channel
-      if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
-        batchSize = 1;
-      }
-
-      // If private, allow user to override with (NN) syntax
-      if (chatType === 'private') {
-        const match = prompt.match(/\((\d+)\)\s*$/);
-        if (match) {
-          let requestedCount = parseInt(match[1], 10);
-          if (requestedCount > 16) requestedCount = 16; // limit for safety
-          batchSize = requestedCount;
-          // remove the trailing (NN)
-          prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
-        }
-      }
-
-      // Example style/negative prompts:
-      const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
-      const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
-      const model = 'flux1-schnell-fp8';
-
-      // Attempt up to 2 times if we get 0 images (NSFW filter false positive)
-      let images = [];
-      const maxNsfwRetries = 2;
-      for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
-        // Create the project
-        let project = await sogni.projects.create({
-          modelId: model,
-          positivePrompt: prompt,
-          negativePrompt: negativePrompt,
-          stylePrompt: style,
-          steps: 4,
-          guidance: 1,
-          numberOfImages: batchSize,
-          scheduler: 'Euler',
-          timeStepSpacing: 'Linear'
-          // disableSafety: true, // enable if you want to bypass NSFW checks
-        });
-
-        console.log(`Project created (attempt ${attempt}): ${project.id} for prompt: "${prompt}"`);
-        images = await project.waitForCompletion();
-        console.log(`Project ${project.id} completed. Received ${images.length} images.`);
-
-        if (images.length === 0 && attempt < maxNsfwRetries) {
-          console.log(
-            `No images returned (likely NSFW filter). Retrying attempt ${attempt + 1}...`
-          );
-          continue;
-        } else {
-          // Either we got images, or we've reached the final attempt
-          break;
-        }
-      }
-
-      // If 0 images returned after all attempts, likely truly blocked by NSFW
-      if (images.length === 0) {
-        bot.sendMessage(
-          chatId,
-          'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
-          threadOptions
+      if (images.length === 0 && attempt < maxNsfwRetries) {
+        console.log(
+          `No images returned (likely NSFW filter). Retrying attempt ${attempt + 1}...`
         );
-        return;
+        continue;
+      } else {
+        // Either we got images, or we've reached the final attempt
+        break;
       }
-
-      // If fewer images returned than requested, at least some were NSFW-filtered
-      if (images.length < batchSize) {
-        const removedCount = batchSize - images.length;
-        bot.sendMessage(
-          chatId,
-          `We generated ${images.length} out of ${batchSize} images. ` +
-          `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
-          threadOptions
-        );
-      }
-
-      // Process all images
-      await processAllImages(images, chatId, threadOptions);
-
-    } catch (error) {
-      // Check for Sogni "Invalid token" error
-      if (
-        error &&
-        error.status === 401 &&
-        error.payload &&
-        error.payload.errorCode === 107
-      ) {
-        console.error('Detected invalid token, restarting process in 5 seconds...');
-        setTimeout(() => {
-          process.exit(1);
-        }, 5000);
-        return;
-      }
-
-      console.error('Error processing request:', error);
-      bot.sendMessage(chatId, 'An error occurred. Please try again later.');
     }
-  };
 
-  // Race the single-request logic against a 30-second timeout
-  Promise.race([
-    handleSingleRequest(),
-    new Promise((_, reject) =>
-      setTimeout(() => {
-        reject(new Error('Queue request timed out after 30s'));
-      }, 30000)
-    )
-  ])
-    .then(() => {
-      console.log('Request completed or timed out for userId:', userId);
-    })
-    .catch((err) => {
-      console.error('Error or timeout while processing the request:', err);
-      bot.sendMessage(chatId, 'Sorry, your request took too long. Skipping...');
-    })
-    .finally(() => {
-      // Clean up and move on
-      pendingUsers.delete(userId);
-      isProcessing = false;
-      console.log(`Finished processing for userId: ${userId}. Queue length is now ${requestQueue.length}.`);
-      processNextRequest(sogni);
-    });
-}
-
-/**
- * Processes all images but enforces a 30-second timeout for each image individually.
- * If an image hits 30 seconds, we skip it, but continue processing the rest.
- */
-async function processAllImages(images, chatId, threadOptions) {
-  for (let i = 0; i < images.length; i++) {
-    try {
-      await Promise.race([
-        processSingleImage(images[i], i, chatId, threadOptions),
-        new Promise((_, reject) =>
-          setTimeout(() => {
-            reject(new Error(`Timeout exceeded: 30s for image #${i + 1}`));
-          }, 30000)
-        )
-      ]);
-    } catch (error) {
-      console.error(`Error or timeout during image #${i + 1}:`, error);
+    // If 0 images returned after all attempts, likely truly blocked by NSFW
+    if (images.length === 0) {
       bot.sendMessage(
         chatId,
-        `Image #${i + 1} took too long or failed to process. Skipping it...`,
-        threadOptions
+        'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
+        messageOptions
       );
-      continue;
+      return;
     }
-  }
 
-  // If we are NOT in a forum thread, send a final note
-  if (!threadOptions.message_thread_id) {
-    bot.sendMessage(chatId, 'Here you go! Right-click / long-press to save them!', threadOptions);
+    // If fewer images returned than requested, at least some were NSFW-filtered
+    if (images.length < batchSize) {
+      const removedCount = batchSize - images.length;
+      bot.sendMessage(
+        chatId,
+        `We generated ${images.length} out of ${batchSize} images. ` +
+        `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
+        messageOptions
+      );
+    }
+
+    // Process all images in parallel or sequentially (here we do sequentially to safely handle timeouts).
+    for (let i = 0; i < images.length; i++) {
+      try {
+        await Promise.race([
+          processSingleImage(images[i], i, chatId, messageOptions),
+          new Promise((_, reject) =>
+            setTimeout(() => {
+              reject(new Error(`Timeout exceeded: 30s for image #${i + 1}`));
+            }, 30000)
+          )
+        ]);
+      } catch (error) {
+        console.error(`Error or timeout during image #${i + 1}:`, error);
+        bot.sendMessage(
+          chatId,
+          `Image #${i + 1} took too long or failed to process. Skipping it...`,
+          messageOptions
+        );
+      }
+    }
+
+    // If we are NOT in a forum thread, send a final note
+    if (!messageOptions.message_thread_id) {
+      bot.sendMessage(chatId, 'Here you go! Right-click / long-press to save them!', messageOptions);
+    }
+  } catch (error) {
+    if (
+      error &&
+      error.status === 401 &&
+      error.payload &&
+      error.payload.errorCode === 107
+    ) {
+      console.error('Detected invalid token, restarting process in 5 seconds...');
+      setTimeout(() => {
+        process.exit(1);
+      }, 5000);
+      return;
+    }
+    console.error('Error performing generation:', error);
+    bot.sendMessage(chatId, 'An error occurred during generation. Please try again later.', messageOptions);
   }
 }
 
@@ -833,6 +704,41 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
     await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath), threadOptions);
   } else {
     throw new Error(`Sticker file not found: ${stickerFilePath}`);
+  }
+}
+
+function handlePollingError(error) {
+  console.error('Polling error:', error);
+
+  // Additional log for clarity
+  console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
+
+  if (retryCount < maxRetries) {
+    const backoffTime = Math.pow(2, retryCount) * 1000;
+    console.log(`Retrying in ${backoffTime / 1000} seconds... (attempt ${retryCount + 1})`);
+
+    setTimeout(() => {
+      retryCount++;
+      bot = new TelegramBot(token, {
+        polling: true,
+        request: {
+          agentOptions: {
+            keepAlive: true,
+            family: 4
+          }
+        }
+      });
+      // Restart the bot with the existing sogni instance
+      if (globalSogni) {
+        console.log('Restarting Telegram bot after polling error...');
+        startTelegramBot(globalSogni);
+      }
+    }, backoffTime);
+  } else {
+    console.error('Max retries reached. Bot is stopping in 5 seconds...');
+    setTimeout(() => {
+      process.exit(1);
+    }, 5000);
   }
 }
 
