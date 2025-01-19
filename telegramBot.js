@@ -1,6 +1,6 @@
 // telegramBot.js
 // Purpose: Handles all Telegram bot logic, including receiving messages, processing image generation,
-// and sticker creation requests. Queue logic has been removed so multiple requests can process at once.
+// and sticker creation requests.
 
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
@@ -740,39 +740,66 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
   }
 }
 
+/**
+ * handlePollingError: Called whenever the Telegram polling fails.
+ * We do an exponential backoff. If the error is a 429, we also
+ * factor in Telegram’s recommended "retry_after" in seconds.
+ */
 function handlePollingError(error) {
   console.error('Polling error:', error);
-
-  // Additional log for clarity
   console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
 
-  if (retryCount < maxRetries) {
-    const backoffTime = Math.pow(2, retryCount) * 1000;
-    console.log(`Retrying in ${backoffTime / 1000} seconds... (attempt ${retryCount + 1})`);
-
-    setTimeout(() => {
-      retryCount++;
-      bot = new TelegramBot(token, {
-        polling: true,
-        request: {
-          agentOptions: {
-            keepAlive: true,
-            family: 4
-          }
-        }
-      });
-      // Restart the bot with the existing sogni instance
-      if (globalSogni) {
-        console.log('Restarting Telegram bot after polling error...');
-        startTelegramBot(globalSogni);
-      }
-    }, backoffTime);
-  } else {
+  if (retryCount >= maxRetries) {
     console.error('Max retries reached. Bot is stopping in 5 seconds...');
     setTimeout(() => {
       process.exit(1);
     }, 5000);
+    return;
   }
+
+  // Exponential backoff (2^retryCount * 1000)
+  let backoffTime = Math.pow(2, retryCount) * 1000;
+
+  // If we specifically get a 429 from Telegram, they usually supply a "retry_after" we should honor
+  // node-telegram-bot-api puts it in error.response.body
+  if (
+    error.code === 'ETELEGRAM' &&
+    error.response &&
+    error.response.body
+  ) {
+    try {
+      const body = JSON.parse(error.response.body);
+      if (body.error_code === 429 && body.parameters && body.parameters.retry_after) {
+        const retryAfter = body.parameters.retry_after;
+        // Ensure we wait at least that many seconds
+        // Add 1 second buffer so we don't hammer right at the cutoff
+        backoffTime = Math.max(backoffTime, (retryAfter + 1) * 1000);
+        console.log(`Detected 429 Too Many Requests. Respecting Telegram retry_after=${retryAfter}s`);
+      }
+    } catch (jsonErr) {
+      // If the body was not valid JSON, do nothing special
+      console.error('Error parsing Telegram error response body:', jsonErr);
+    }
+  }
+
+  retryCount++;
+  console.log(`Retrying in ${backoffTime / 1000} seconds... (attempt ${retryCount})`);
+
+  setTimeout(() => {
+    bot = new TelegramBot(token, {
+      polling: true,
+      request: {
+        agentOptions: {
+          keepAlive: true,
+          family: 4
+        }
+      }
+    });
+    console.log('Restarting Telegram bot after polling error...');
+    if (globalSogni) {
+      startTelegramBot(globalSogni);
+    }
+  }, backoffTime);
 }
 
 module.exports = startTelegramBot;

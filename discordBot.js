@@ -8,29 +8,59 @@ const removeImageBg = require('./lib/removeImageBgOriginal');
 // Load the Discord token from the environment variables
 const token = process.env.DISCORD_BOT_TOKEN;
 
-// Initialize Discord client
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
-});
+// Exponential backoff for Discord
+let discordRetryCount = 0;
+const discordMaxRetries = 1000;
+const baseDelayMs = 1000; // 1 second initial delay
 
-client.on('warn', console.warn);
-client.on('error', console.error);
+function exponentialReconnect(client) {
+  if (discordRetryCount >= discordMaxRetries) {
+    console.error('Max Discord reconnect attempts reached. Exiting in 5s...');
+    setTimeout(() => process.exit(1), 5000);
+    return;
+  }
 
-const requestQueue = [];
-const pendingUsers = new Set();
-let isProcessing = false;
+  const backoffTime = Math.pow(2, discordRetryCount) * baseDelayMs;
+  discordRetryCount++;
+  console.warn(`Attempting to reconnect to Discord in ${backoffTime / 1000}s (attempt #${discordRetryCount})...`);
 
-// Keep track of each user's last prompt so we can handle "!repeat"
-const lastPromptByUser = {};
+  setTimeout(() => {
+    // If you want to fully rebuild the client:
+    client.destroy();
 
-/**
- * Start the Discord Bot
- * @param sogni
- */
-const startDiscordBot = (sogni) => {
-  client.once('ready', () => {
+    // Create a new client instance
+    const newClient = new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+      ]
+    });
+
+    attachEventListeners(newClient);
+
+    newClient.login(token).catch((err) => {
+      console.error('Error logging in to Discord on reconnect attempt:', err);
+      exponentialReconnect(newClient);
+    });
+  }, backoffTime);
+}
+
+function attachEventListeners(client) {
+  client.on('warn', console.warn);
+
+  // If you want to handle unknown connection issues or timeouts:
+  client.on('error', (error) => {
+    console.error('Discord client error:', error);
+    // Attempt exponential backoff reconnect
+    exponentialReconnect(client);
+  });
+
+  // The rest is your normal event handling
+  client.on('ready', () => {
     console.log(`Discord bot logged in as ${client.user.tag}`);
-    client.guilds.cache.forEach((guild) => console.log('guilds:', guild.name, guild.id));
+    // Reset retry count after a successful login
+    discordRetryCount = 0;
   });
 
   client.on('guildCreate', (guild) => {
@@ -92,7 +122,7 @@ const startDiscordBot = (sogni) => {
         message.channel.send(`Generating images for: ${prompt}`);
       }
 
-      processNextRequest(sogni);
+      processNextRequest(sogniRef);
     }
     else if (command === 'repeat') {
       // Use the last prompt
@@ -117,15 +147,38 @@ const startDiscordBot = (sogni) => {
         message.channel.send(`Generating images for: ${lastPrompt} [repeat]`);
       }
 
-      processNextRequest(sogni);
+      processNextRequest(sogniRef);
     }
     else {
       message.channel.send('Unknown command. Use `!help` to see available commands.');
     }
   });
+}
 
-  client.login(token);
-};
+// Queue logic
+const requestQueue = [];
+const pendingUsers = new Set();
+let isProcessing = false;
+const lastPromptByUser = {};
+let sogniRef = null; // store sogni globally in this module
+
+//Start the Discord Bot
+function startDiscordBot(sogni) {
+  sogniRef = sogni; // store reference for processNextRequest
+
+  // Create the initial client
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  });
+
+  attachEventListeners(client);
+
+  console.log('Logging in to Discord...');
+  client.login(token).catch((err) => {
+    console.error('Initial Discord login error:', err);
+    exponentialReconnect(client);
+  });
+}
 
 async function processNextRequest(sogni) {
   if (isProcessing) return;
@@ -161,9 +214,9 @@ async function processNextRequest(sogni) {
         timeStepSpacing: 'Linear',
       });
 
-      if (attempt>1){
+      if (attempt > 1) {
         channel.send(`**Attempt ${attempt}**: Generating...`);
-      }else{
+      } else {
         channel.send(`Generating...`);
       }
 
