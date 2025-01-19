@@ -7,11 +7,11 @@ A battle-tested Telegram and Discord bot for generating AI-powered stickers, **p
 
 This bot can generate fun, unique stickers via chat prompt:
 
-<img src="https://raw.githubusercontent.com/Sogni-AI/sogni-sticker-bot/main/assets/example-prompt.jpg" alt="Chat prompt example" width="300"/>
+<img src="https://raw.githubusercontent.com/Sogni-AI/sogni-sticker-bot/main/assets/example-prompt.jpg" alt="Chat prompt example" width="600"/>
 
 *Chat prompt example*
 
-<img src="https://raw.githubusercontent.com/Sogni-AI/sogni-sticker-bot/main/assets/example-stickers.jpg" alt="Sticker examples" width="300"/>
+<img src="https://raw.githubusercontent.com/Sogni-AI/sogni-sticker-bot/main/assets/example-stickers.jpg" alt="Sticker examples" width="600"/>
 
 *Sticker examples*
 
