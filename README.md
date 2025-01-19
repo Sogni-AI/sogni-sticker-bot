@@ -3,6 +3,16 @@
 
 A battle-tested Telegram and Discord bot for generating AI-powered stickers, **powered by [Sogni Supernet](https://www.sogni.ai/supernet)**. This bot will generate images on-demand and convert them into stickers you can easily share.
 
+## Sample Stickers
+
+This bot can generate fun, unique stickers via chat prompt:
+
+![Chat prompt example](https://raw.githubusercontent.com/Sogni-AI/sogni-sticker-bot/main/assets/example-prompt.jpg)
+*Chat prompt example*
+
+![Sticker examples](https://raw.githubusercontent.com/Sogni-AI/sogni-sticker-bot/main/assets/example-stickers.jpg)
+*Sticker examples*
+
 ## How It Works
 
 1. Users type a command (`!generate <prompt>`) in your Telegram/Discord server or DM.  
