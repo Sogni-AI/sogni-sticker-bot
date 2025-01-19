@@ -463,13 +463,13 @@ Blacklist means the prompt must contain none of those words.
         return;
       }
 
-      // Immediately process the request (no queue).
+      // Immediately process the request
       bot.sendMessage(chatId, `Generating stickers for: ${lastPrompt} [repeat]`, messageOptions);
       handleGenerationRequest(msg, lastPrompt);
       return;
     }
 
-    // 3) Only handle generation if it starts with "!generate"
+    // 3) Generate command: "!generate"
     if (userMessage.startsWith('!generate')) {
       // If we are in a group / supergroup, check whitelist/blacklist
       if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
@@ -500,12 +500,27 @@ Blacklist means the prompt must contain none of those words.
       const userPrompt = msg.text.replace(/^!generate\b\s*/i, '').trim();
       bot.sendMessage(chatId, `Generating stickers for: ${userPrompt}`, messageOptions);
 
-      // Immediately process the request (no queue).
+      // Immediately process the request
       handleGenerationRequest(msg, userPrompt);
       return;
     }
 
-    // If it doesn't start with '!generate', '!repeat', or greet the bot, do nothing else.
+    /**
+     * 4) If in private chat and the user isn't issuing a recognized command
+     *    or greeting, send a simple "welcome/usage" message.
+     */
+    if (msg.chat.type === 'private') {
+      bot.sendMessage(
+        chatId,
+        `Hello! I am your AI sticker bot. Here are some things you can do:\n` +
+        `- /start to see a welcome message\n` +
+        `- /help to see more commands\n` +
+        `- !generate <your prompt> to create stickers\n` +
+        `- !repeat to create more using your last prompt`,
+        messageOptions
+      );
+    }
+    // For group/supergroup: if it doesn't match known commands or a mention, do nothing else.
   });
 
   bot.on('polling_error', handlePollingError);
@@ -565,12 +580,22 @@ async function handleGenerationRequest(msg, prompt) {
  */
 async function performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions) {
   const chatId = msg.chat.id;
+
+  /**
+   * Step 2 explanation (important comment):
+   * We now attempt to generate images twice if any of them were removed by the NSFW filter.
+   * That means if the first attempt returns fewer images than requested (some removed),
+   * we do one more attempt with the same prompt before telling the user that images were removed.
+   * We combine images from both attempts so the user can get as many valid images as possible.
+   * Future revisions should keep this logic, as it's explicitly requested.
+   */
   try {
     const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
     const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
 
-    let images = [];
+    // We will accumulate images across up to 2 attempts.
+    const allImages = [];
     const maxNsfwRetries = 2;
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
       // Create the project
@@ -587,19 +612,27 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       });
 
       console.log(`Project created (attempt ${attempt}): ${project.id} for prompt: "${prompt}"`);
-      images = await project.waitForCompletion();
-      console.log(`Project ${project.id} completed. Received ${images.length} images.`);
+      const attemptImages = await project.waitForCompletion();
+      console.log(`Project ${project.id} completed. Received ${attemptImages.length} images.`);
 
-      if (images.length === 0 && attempt < maxNsfwRetries) {
-        console.log(
-          `No images returned (likely NSFW filter). Retrying attempt ${attempt + 1}...`
-        );
-        continue;
-      } else {
-        // Either we got images, or we've reached the final attempt
+      // Accumulate valid images from this attempt
+      if (attemptImages.length > 0) {
+        allImages.push(...attemptImages);
+      }
+
+      // If we got enough images, no need to attempt again
+      if (allImages.length >= batchSize) {
         break;
+      } else if (attempt < maxNsfwRetries) {
+        console.log(
+          `We got ${attemptImages.length} images in attempt ${attempt}, ` +
+          `total so far = ${allImages.length}, but wanted ${batchSize}. Retrying...`
+        );
       }
     }
+
+    // Now that we've attempted up to 2 times, check how many total images we have
+    const images = allImages;
 
     // If 0 images returned after all attempts, likely truly blocked by NSFW
     if (images.length === 0) {
@@ -611,7 +644,7 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       return;
     }
 
-    // If fewer images returned than requested, at least some were NSFW-filtered
+    // If fewer images returned than requested, some or all were NSFW-filtered
     if (images.length < batchSize) {
       const removedCount = batchSize - images.length;
       bot.sendMessage(
@@ -622,7 +655,7 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       );
     }
 
-    // Process all images in parallel or sequentially (here we do sequentially to safely handle timeouts).
+    // Process all images in sequence (to avoid timeouts)
     for (let i = 0; i < images.length; i++) {
       try {
         await Promise.race([
