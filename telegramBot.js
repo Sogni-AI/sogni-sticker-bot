@@ -2,6 +2,7 @@
 // Purpose: Handles all Telegram bot logic, including receiving messages, processing image generation,
 // and sticker creation requests.
 
+require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
@@ -39,19 +40,19 @@ function saveChannelConfig(config) {
 // Load the Telegram token from the .env file
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
-    console.error('Error: TELEGRAM_BOT_TOKEN is not set in the environment.');
-    process.exit(1);
+  console.error('Error: TELEGRAM_BOT_TOKEN is not set in the environment.');
+  process.exit(1);
 }
 console.log('Telegram bot token:', token);
 
 let bot = new TelegramBot(token, {
-    polling: true,
-    request: {
-        agentOptions: {
-            keepAlive: true,
-            family: 4
-        }
-    }
+  polling: true,
+  request: {
+    agentOptions: {
+      keepAlive: true,
+      family: 4,
+    },
+  },
 });
 
 // We store the bot's username (handle) for mention-checking logic
@@ -80,7 +81,7 @@ const maxRetries = 9999;
 async function isChannelAdmin(chatId, userId) {
   try {
     const member = await bot.getChatMember(chatId, userId);
-    return (member.status === 'administrator' || member.status === 'creator');
+    return member.status === 'administrator' || member.status === 'creator';
   } catch (err) {
     console.error('Error checking admin status:', err);
     return false;
@@ -110,7 +111,7 @@ function validateMessage(channelId, messageText) {
       return {
         isValid: false,
         hasBlacklistedWords: true,
-        missingWhitelistWords: []
+        missingWhitelistWords: [],
       };
     }
   }
@@ -130,7 +131,7 @@ function validateMessage(channelId, messageText) {
       return {
         isValid: false,
         hasBlacklistedWords: false,
-        missingWhitelistWords: whitelist
+        missingWhitelistWords: whitelist,
       };
     }
   }
@@ -153,7 +154,7 @@ const startTelegramBot = (sogni) => {
   globalSogni = sogni;
 
   /**
-   *  /help command (available to everyone)
+   * /help command (available to everyone)
    */
   bot.onText(/^\/help$/, (msg) => {
     const messageOptions = getThreadMessageOptions(msg);
@@ -171,9 +172,6 @@ const startTelegramBot = (sogni) => {
 
 - **/listwhitelist** - Show the channel's current whitelist
 - **/listblacklist** - Show the channel's current blacklist (admin-only)
-
-Whitelist means the prompt must contain at least one of these words.
-Blacklist means the prompt must contain none of those words.
     `;
     bot.sendMessage(msg.chat.id, helpText, { ...messageOptions, parse_mode: 'Markdown' });
   });
@@ -216,11 +214,7 @@ Blacklist means the prompt must contain none of those words.
     }
 
     const list = channelConfig[chatId].whitelist;
-    bot.sendMessage(
-      chatId,
-      `Current whitelist words:\n• ${list.join('\n• ')}`,
-      messageOptions
-    );
+    bot.sendMessage(chatId, `Current whitelist words:\n• ${list.join('\n• ')}`, messageOptions);
   });
 
   // /listblacklist (admin only)
@@ -240,11 +234,7 @@ Blacklist means the prompt must contain none of those words.
     }
 
     const list = channelConfig[chatId].blacklist;
-    bot.sendMessage(
-      chatId,
-      `Current blacklist words:\n• ${list.join('\n• ')}`,
-      messageOptions
-    );
+    bot.sendMessage(chatId, `Current blacklist words:\n• ${list.join('\n• ')}`, messageOptions);
   });
 
   // /addwhitelist
@@ -276,7 +266,7 @@ Blacklist means the prompt must contain none of those words.
     // Now split by comma
     const wordsToAdd = wordsString
       .split(',')
-      .map(w => w.trim().toLowerCase())
+      .map((w) => w.trim().toLowerCase())
       .filter(Boolean);
 
     if (!channelConfig[chatId]) {
@@ -302,11 +292,7 @@ Blacklist means the prompt must contain none of those words.
         messageOptions
       );
     } else {
-      return bot.sendMessage(
-        chatId,
-        `Added to whitelist: ${addedWords.join(', ')}`,
-        messageOptions
-      );
+      return bot.sendMessage(chatId, `Added to whitelist: ${addedWords.join(', ')}`, messageOptions);
     }
   });
 
@@ -337,7 +323,7 @@ Blacklist means the prompt must contain none of those words.
     // Split by comma
     const wordsToAdd = wordsString
       .split(',')
-      .map(w => w.trim().toLowerCase())
+      .map((w) => w.trim().toLowerCase())
       .filter(Boolean);
 
     if (!channelConfig[chatId]) {
@@ -362,11 +348,7 @@ Blacklist means the prompt must contain none of those words.
         messageOptions
       );
     } else {
-      return bot.sendMessage(
-        chatId,
-        `Added to blacklist: ${addedWords.join(', ')}`,
-        messageOptions
-      );
+      return bot.sendMessage(chatId, `Added to blacklist: ${addedWords.join(', ')}`, messageOptions);
     }
   });
 
@@ -463,7 +445,6 @@ Blacklist means the prompt must contain none of those words.
         return;
       }
 
-      // Immediately process the request
       bot.sendMessage(chatId, `Generating stickers for: ${lastPrompt} [repeat]`, messageOptions);
       handleGenerationRequest(msg, lastPrompt);
       return;
@@ -474,18 +455,10 @@ Blacklist means the prompt must contain none of those words.
       // If we are in a group / supergroup, check whitelist/blacklist
       if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
         const { isValid, hasBlacklistedWords, missingWhitelistWords } = validateMessage(chatId, userMessage);
-
         if (!isValid) {
-          // 1) Blacklisted words used
           if (hasBlacklistedWords) {
-            bot.sendMessage(
-              chatId,
-              `You can't use blacklisted words in your prompt. Please try again.`,
-              messageOptions
-            );
-          }
-          // 2) Missing whitelist words
-          else if (missingWhitelistWords.length > 0) {
+            bot.sendMessage(chatId, `You can't use blacklisted words in your prompt. Please try again.`, messageOptions);
+          } else if (missingWhitelistWords.length > 0) {
             bot.sendMessage(
               chatId,
               `You must include at least one of the following whitelisted words: ${missingWhitelistWords.join(', ')}.`,
@@ -500,27 +473,22 @@ Blacklist means the prompt must contain none of those words.
       const userPrompt = msg.text.replace(/^!generate\b\s*/i, '').trim();
       bot.sendMessage(chatId, `Generating stickers for: ${userPrompt}`, messageOptions);
 
-      // Immediately process the request
       handleGenerationRequest(msg, userPrompt);
       return;
     }
 
-    /**
-     * 4) If in private chat and the user isn't issuing a recognized command
-     *    or greeting, send a simple "welcome/usage" message.
-     */
+    // 4) If in private chat with unrecognized command:
     if (msg.chat.type === 'private') {
       bot.sendMessage(
         chatId,
         `Hello! I am your AI sticker bot. Here are some things you can do:\n` +
-        `- /start to see a welcome message\n` +
-        `- /help to see more commands\n` +
-        `- !generate <your prompt> to create stickers\n` +
-        `- !repeat to create more using your last prompt`,
+          `- /start to see a welcome message\n` +
+          `- /help to see more commands\n` +
+          `- !generate <your prompt> to create stickers\n` +
+          `- !repeat to create more using your last prompt`,
         messageOptions
       );
     }
-    // For group/supergroup: if it doesn't match known commands or a mention, do nothing else.
   });
 
   bot.on('polling_error', handlePollingError);
@@ -528,7 +496,6 @@ Blacklist means the prompt must contain none of those words.
 
 /**
  * Perform the actual generation and sticker processing for a single request.
- * This used to be queued, but now is run immediately for concurrency.
  */
 async function handleGenerationRequest(msg, prompt) {
   const chatId = msg.chat.id;
@@ -547,7 +514,7 @@ async function handleGenerationRequest(msg, prompt) {
     batchSize = 1;
   }
 
-  // If private, allow user to override with (NN) syntax
+  // If private, allow user to override with (NN) syntax, e.g. "!generate cat (5)"
   if (chatType === 'private') {
     const match = prompt.match(/\((\d+)\)\s*$/);
     if (match) {
@@ -559,15 +526,15 @@ async function handleGenerationRequest(msg, prompt) {
     }
   }
 
-  // We'll wrap the generation logic in a promise.race to enforce a 30-second timeout
   try {
+    // 30-second overall timeout to avoid indefinite wait
     await Promise.race([
       performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions),
-      new Promise((_, reject) =>
+      new Promise((_, reject) => {
         setTimeout(() => {
           reject(new Error('Request timed out after 30s'));
-        }, 30000)
-      )
+        }, 30000);
+      }),
     ]);
   } catch (err) {
     console.error('Error or timeout while processing generation request:', err);
@@ -626,45 +593,38 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       } else if (attempt < maxNsfwRetries) {
         console.log(
           `We got ${attemptImages.length} images in attempt ${attempt}, ` +
-          `total so far = ${allImages.length}, but wanted ${batchSize}. Retrying...`
+            `total so far = ${allImages.length}, but wanted ${batchSize}. Retrying...`
         );
       }
     }
 
-    // Now that we've attempted up to 2 times, check how many total images we have
     const images = allImages;
 
-    // If 0 images returned after all attempts, likely truly blocked by NSFW
     if (images.length === 0) {
-      bot.sendMessage(
-        chatId,
-        'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!',
-        messageOptions
-      );
+      bot.sendMessage(chatId, 'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!', messageOptions);
       return;
     }
 
-    // If fewer images returned than requested, some or all were NSFW-filtered
     if (images.length < batchSize) {
       const removedCount = batchSize - images.length;
       bot.sendMessage(
         chatId,
         `We generated ${images.length} out of ${batchSize} images. ` +
-        `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
+          `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
         messageOptions
       );
     }
 
-    // Process all images in sequence (to avoid timeouts)
+    // Process images in sequence (to avoid timeouts or memory spikes)
     for (let i = 0; i < images.length; i++) {
       try {
         await Promise.race([
           processSingleImage(images[i], i, chatId, messageOptions),
-          new Promise((_, reject) =>
+          new Promise((_, reject) => {
             setTimeout(() => {
               reject(new Error(`Timeout exceeded: 30s for image #${i + 1}`));
-            }, 30000)
-          )
+            }, 30000);
+          }),
         ]);
       } catch (error) {
         console.error(`Error or timeout during image #${i + 1}:`, error);
@@ -699,7 +659,7 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
 }
 
 /**
- * Process a single image:
+ * Process a single image into a sticker:
  *  1. Download it
  *  2. Remove background
  *  3. Convert to sticker
@@ -757,11 +717,13 @@ function handlePollingError(error) {
     return;
   }
 
-  // Exponential backoff (2^retryCount * 1000)
-  let backoffTime = Math.pow(2, retryCount) * 1000;
+  // Exponential backoff: 2^retryCount * 1000, but cap it
+  let rawBackoffTime = Math.pow(2, retryCount) * 1000;
+  // For safety, cap at 1 hour
+  const maxBackoffTime = 60 * 60 * 1000;
+  let backoffTime = Math.min(rawBackoffTime, maxBackoffTime);
 
-  // If we specifically get a 429 from Telegram, they usually supply a "retry_after" we should honor
-  // node-telegram-bot-api puts it in error.response.body
+  // If we get a 429 from Telegram, they often supply a "retry_after" in error.response.body
   if (
     error.code === 'ETELEGRAM' &&
     error.response &&
@@ -771,13 +733,13 @@ function handlePollingError(error) {
       const body = JSON.parse(error.response.body);
       if (body.error_code === 429 && body.parameters && body.parameters.retry_after) {
         const retryAfter = body.parameters.retry_after;
-        // Ensure we wait at least that many seconds
-        // Add 1 second buffer so we don't hammer right at the cutoff
-        backoffTime = Math.max(backoffTime, (retryAfter + 1) * 1000);
+        // Honor Telegram's retry_after (in seconds), add 1-second buffer
+        const recommendedWait = (retryAfter + 1) * 1000;
+        backoffTime = Math.max(backoffTime, recommendedWait);
         console.log(`Detected 429 Too Many Requests. Respecting Telegram retry_after=${retryAfter}s`);
       }
     } catch (jsonErr) {
-      // If the body was not valid JSON, do nothing special
+      // If there's an issue parsing, ignore it
       console.error('Error parsing Telegram error response body:', jsonErr);
     }
   }
@@ -791,9 +753,9 @@ function handlePollingError(error) {
       request: {
         agentOptions: {
           keepAlive: true,
-          family: 4
-        }
-      }
+          family: 4,
+        },
+      },
     });
     console.log('Restarting Telegram bot after polling error...');
     if (globalSogni) {

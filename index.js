@@ -8,7 +8,7 @@ let sogniRetryCount = 0;            // How many times we've retried Sogni so far
 const sogniMaxRetries = 1000;       // Increase if you want more attempts
 const sogniBaseDelayMs = 1000;      // First attempt delay in ms (gets doubled)
 
-//Express app setup
+// Express app setup
 const app = express();
 const port = process.env.PORT || 3004;
 
@@ -83,12 +83,17 @@ async function connectWithBackoff() {
 // Helper to schedule the next reconnection
 function attemptReconnect() {
   sogniRetryCount++;
-  const backoffTime = Math.pow(2, sogniRetryCount) * sogniBaseDelayMs;
+  // Exponential backoff, but cap it so we don't reach Infinity
+  const rawBackoff = Math.pow(2, sogniRetryCount) * sogniBaseDelayMs;
+  // Example: cap at 1 hour
+  const maxBackoffMs = 60 * 60 * 1000; 
+  const backoffTime = Math.min(rawBackoff, maxBackoffMs);
+
   console.log(`Reconnecting to Sogni in ${backoffTime / 1000} seconds... (attempt #${sogniRetryCount + 1})`);
 
   setTimeout(() => {
     connectWithBackoff().catch(() => {
-      // If it fails again, we let the function itself do the repeating or exit.
+      // If it fails again, the function itself will repeat or exit.
     });
   }, backoffTime);
 }
