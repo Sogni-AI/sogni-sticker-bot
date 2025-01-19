@@ -15,6 +15,8 @@ This bot can generate fun, unique stickers via chat prompt:
 
 *Sticker examples*
 
+Want to create sticker packs from a collection of generated stickers? Details in our [official documentation](https://docs.sogni.ai/learn/telegram-ai-sticker-bot).
+
 ## How It Works
 
 1. Users type a command (`!generate <prompt>`) in your Telegram/Discord server or DM.  
