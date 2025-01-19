@@ -32,8 +32,8 @@ This bot can generate fun, unique stickers via chat prompt:
 
 You’ll need **a free Sogni username and password** to use this bot. You can create an account:
 
-- In the **Sogni Mac** or **iOS** app, or  
-- At the **[Sogni Web App](https://app.sogni.ai/)** (click “Sign Up”)
+- In the **[Sogni Mac Studio Pro](https://www.sogni.ai/studio)** or **[Sogni Pocket (iOS)](https://www.sogni.ai/pocket)**, or  
+- At the **[Sogni Web App](https://www.sogni.ai/sogni-web)** (click “Sign Up”)
 
 ---
 
