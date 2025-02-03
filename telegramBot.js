@@ -575,7 +575,10 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
         guidance: 1,
         numberOfImages: batchSize,
         scheduler: 'Euler',
-        timeStepSpacing: 'Linear'
+        timeStepSpacing: 'Linear',
+        sizePreset: 'custom',
+        width: 512,
+        height: 512,
       });
 
       console.log(`Project created (attempt ${attempt}): ${project.id} for prompt: "${prompt}"`);

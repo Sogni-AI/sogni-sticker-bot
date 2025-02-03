@@ -38,8 +38,6 @@ async function connectWithBackoff() {
 
     const sogni = await SogniClient.createInstance({
       appId: process.env.APP_ID,
-      restEndpoint: 'https://api.sogni.ai',
-      socketEndpoint: 'https://socket.sogni.ai',
       testnet: true,
       network: 'fast'
     });
@@ -86,7 +84,7 @@ function attemptReconnect() {
   // Exponential backoff, but cap it so we don't reach Infinity
   const rawBackoff = Math.pow(2, sogniRetryCount) * sogniBaseDelayMs;
   // Example: cap at 1 hour
-  const maxBackoffMs = 60 * 60 * 1000; 
+  const maxBackoffMs = 60 * 60 * 1000;
   const backoffTime = Math.min(rawBackoff, maxBackoffMs);
 
   console.log(`Reconnecting to Sogni in ${backoffTime / 1000} seconds... (attempt #${sogniRetryCount + 1})`);
