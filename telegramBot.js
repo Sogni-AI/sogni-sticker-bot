@@ -163,6 +163,7 @@ const startTelegramBot = (sogni) => {
 - **/help** - Show this help message
 - **/start** - Basic start message
 - **!generate <prompt>** - Generate stickers
+- **!imagine <prompt>** - (same as !generate)
 - **!repeat** - Generate more images with your last prompt
 
 - **/addwhitelist** - Add comma-separated words to this channel's whitelist (admin-only)
@@ -178,13 +179,15 @@ const startTelegramBot = (sogni) => {
 
   /**
    * /start command
+   * Only trigger if the entire message is exactly "/start" (with optional thread info).
    */
-  bot.onText(/\/start/, (msg) => {
+  bot.onText(/^\/start$/, (msg) => {
     const chatId = msg.chat.id;
     const messageOptions = getThreadMessageOptions(msg);
+
     bot.sendMessage(
       chatId,
-      'Good day! What would you like me to create a sticker of? Use "!generate Your prompt..."!',
+      'Good day! What would you like me to create a sticker of? Use "!generate Your prompt..." or "!imagine Your prompt...".',
       messageOptions
     );
   });
@@ -402,7 +405,6 @@ const startTelegramBot = (sogni) => {
    * Handle all incoming messages
    */
   bot.on('message', async (msg) => {
-    // console.log('msg', msg);
     const chatId = msg.chat.id;
     const userMessage = msg.text && msg.text.toLowerCase();
     if (!userMessage) return;
@@ -410,13 +412,13 @@ const startTelegramBot = (sogni) => {
     // We'll always respond in the thread if it's a forum
     const messageOptions = getThreadMessageOptions(msg);
 
-    // 1) Greetings logic (only respond if in private chat or mentioned @botUsername in group)
+    // 1) Simple greetings logic
     const isGreeting = userMessage.startsWith('hi') || userMessage.startsWith('hello');
     if (isGreeting) {
       if (msg.chat.type === 'private') {
         bot.sendMessage(
           chatId,
-          `Hello, I am Sogni AI sticker bot! Type /start to get started, or use "!generate Your prompt..."!`,
+          `Hello, I am Sogni AI sticker bot! Type /start to get started, or use "!generate <prompt>" or "!imagine <prompt>"!`,
           messageOptions
         );
         return;
@@ -428,7 +430,7 @@ const startTelegramBot = (sogni) => {
         if (mentionRegex.test(userMessage)) {
           bot.sendMessage(
             chatId,
-            `Hello, I am Sogni AI sticker bot! Type /start to get started, or use "!generate Your prompt..."!`,
+            `Hello, I am Sogni AI sticker bot! Type /start to get started, or use "!imagine <prompt>"!`,
             messageOptions
           );
         }
@@ -441,7 +443,7 @@ const startTelegramBot = (sogni) => {
       const userId = msg.from.id;
       const lastPrompt = userLastPrompt[userId];
       if (!lastPrompt) {
-        bot.sendMessage(chatId, 'No last prompt found. Please use "!generate <prompt>" first.', messageOptions);
+        bot.sendMessage(chatId, 'No last prompt found. Please use "!imagine <prompt>" first.', messageOptions);
         return;
       }
 
@@ -450,8 +452,8 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
-    // 3) Generate command: "!generate"
-    if (userMessage.startsWith('!generate')) {
+    // 3) Generate command: "!generate" or "!imagine"
+    if (userMessage.startsWith('!generate') || userMessage.startsWith('!imagine')) {
       // If we are in a group / supergroup, check whitelist/blacklist
       if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
         const { isValid, hasBlacklistedWords, missingWhitelistWords } = validateMessage(chatId, userMessage);
@@ -469,8 +471,8 @@ const startTelegramBot = (sogni) => {
         }
       }
 
-      // Strip out "!generate" and get the prompt
-      const userPrompt = msg.text.replace(/^!generate\b\s*/i, '').trim();
+      // Strip out the leading "!generate" or "!imagine" and get the prompt
+      let userPrompt = msg.text.replace(/^!(generate|imagine)\b\s*/i, '').trim();
       bot.sendMessage(chatId, `Generating stickers for: ${userPrompt}`, messageOptions);
 
       handleGenerationRequest(msg, userPrompt);
@@ -484,7 +486,7 @@ const startTelegramBot = (sogni) => {
         `Hello! I am your AI sticker bot. Here are some things you can do:\n` +
           `- /start to see a welcome message\n` +
           `- /help to see more commands\n` +
-          `- !generate <your prompt> to create stickers\n` +
+          `- !generate <your prompt> or !imagine <your prompt> to create stickers\n` +
           `- !repeat to create more using your last prompt`,
         messageOptions
       );
@@ -502,7 +504,7 @@ async function handleGenerationRequest(msg, prompt) {
   const userId = msg.from.id;
   const messageOptions = getThreadMessageOptions(msg);
 
-  // Store this prompt as the last prompt for user
+  // Store this prompt as the last prompt for the user
   userLastPrompt[userId] = prompt;
 
   // Decide how many images to generate based on chat type
@@ -549,12 +551,10 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
   const chatId = msg.chat.id;
 
   /**
-   * Step 2 explanation (important comment):
-   * We now attempt to generate images twice if any of them were removed by the NSFW filter.
-   * That means if the first attempt returns fewer images than requested (some removed),
-   * we do one more attempt with the same prompt before telling the user that images were removed.
-   * We combine images from both attempts so the user can get as many valid images as possible.
-   * Future revisions should keep this logic, as it's explicitly requested.
+   * Step 2 explanation (important):
+   * Attempt to generate images twice if any are removed by NSFW filtering. 
+   * If the first attempt returns fewer images than requested, do one more attempt
+   * with the same prompt before telling the user some images were removed.
    */
   try {
     const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
@@ -604,21 +604,22 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
     const images = allImages;
 
     if (images.length === 0) {
-      bot.sendMessage(chatId, 'No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!', messageOptions);
+      // fully blocked by NSFW
+      msg.reply('No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!', messageOptions);
       return;
     }
 
     if (images.length < batchSize) {
       const removedCount = batchSize - images.length;
       bot.sendMessage(
-        chatId,
-        `We generated ${images.length} out of ${batchSize} images. ` +
-          `${removedCount} image${removedCount > 1 ? 's' : ''} was removed by the NSFW filter.`,
+        msg.chat.id,
+        `We generated ${images.length} out of ${batchSize} image(s). ` +
+          `${removedCount} was removed by the NSFW filter.`,
         messageOptions
       );
     }
 
-    // Process images in sequence (to avoid timeouts or memory spikes)
+    // Process images in sequence
     for (let i = 0; i < images.length; i++) {
       try {
         await Promise.race([
@@ -705,8 +706,7 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
 
 /**
  * handlePollingError: Called whenever the Telegram polling fails.
- * We do an exponential backoff. If the error is a 429, we also
- * factor in Telegram’s recommended "retry_after" in seconds.
+ * We do an exponential backoff. If the error is a 429, factor in Telegram’s recommended "retry_after".
  */
 function handlePollingError(error) {
   console.error('Polling error:', error);
@@ -720,13 +720,13 @@ function handlePollingError(error) {
     return;
   }
 
-  // Exponential backoff: 2^retryCount * 1000, but cap it
+  // Exponential backoff
   let rawBackoffTime = Math.pow(2, retryCount) * 1000;
-  // For safety, cap at 1 hour
+  // Cap at 1 hour
   const maxBackoffTime = 60 * 60 * 1000;
   let backoffTime = Math.min(rawBackoffTime, maxBackoffTime);
 
-  // If we get a 429 from Telegram, they often supply a "retry_after" in error.response.body
+  // If we get a 429 from Telegram, they often supply a "retry_after"
   if (
     error.code === 'ETELEGRAM' &&
     error.response &&
@@ -736,13 +736,11 @@ function handlePollingError(error) {
       const body = JSON.parse(error.response.body);
       if (body.error_code === 429 && body.parameters && body.parameters.retry_after) {
         const retryAfter = body.parameters.retry_after;
-        // Honor Telegram's retry_after (in seconds), add 1-second buffer
         const recommendedWait = (retryAfter + 1) * 1000;
         backoffTime = Math.max(backoffTime, recommendedWait);
-        console.log(`Detected 429 Too Many Requests. Respecting Telegram retry_after=${retryAfter}s`);
+        console.log(`Detected 429. Respecting Telegram retry_after=${retryAfter}s`);
       }
     } catch (jsonErr) {
-      // If there's an issue parsing, ignore it
       console.error('Error parsing Telegram error response body:', jsonErr);
     }
   }
