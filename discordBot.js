@@ -49,14 +49,13 @@ function exponentialReconnect(client) {
 function attachEventListeners(client) {
   client.on('warn', console.warn);
 
-  // If you want to handle unknown connection issues or timeouts:
+  // Handle unknown connection issues or timeouts:
   client.on('error', (error) => {
     console.error('Discord client error:', error);
     // Attempt exponential backoff reconnect
     exponentialReconnect(client);
   });
 
-  // The rest is your normal event handling
   client.on('ready', () => {
     console.log(`Discord bot logged in as ${client.user.tag}`);
     // Reset retry count after a successful login
@@ -85,21 +84,25 @@ function attachEventListeners(client) {
 
     // ---- Handle commands ----
     if (command === 'start') {
-      message.channel.send('Good day! Use `!generate [your prompt]` to create an image.');
+      message.channel.send('Good day! Use `!generate [your prompt]` or `!imagine [your prompt]` to create an image.');
     }
     else if (command === 'help') {
       message.channel.send(
         'Available commands:\n' +
           '`!start` - Start interaction with the bot.\n' +
           '`!generate [prompt]` - Generate images.\n' +
+          '`!imagine [prompt]` - Same as !generate.\n' +
           '`!repeat` - Generate more images with your last prompt.\n' +
           '`!help` - Show this help message.'
       );
     }
-    else if (command === 'generate') {
+    // ----- Updated line below: now we check if command is 'generate' OR 'imagine' -----
+    else if (command === 'generate' || command === 'imagine') {
       const prompt = args.join(' ');
       if (!prompt) {
-        message.channel.send('Please provide a prompt. Usage: `!generate [your prompt]`');
+        message.channel.send(
+          'Please provide a prompt. Usage: `!generate [your prompt]` or `!imagine [your prompt]`.'
+        );
         return;
       }
 
@@ -180,6 +183,9 @@ function startDiscordBot(sogni) {
   });
 }
 
+/**
+ * Process the next request in the queue
+ */
 async function processNextRequest(sogni) {
   if (isProcessing) return;
   if (requestQueue.length === 0) return;
@@ -195,7 +201,7 @@ async function processNextRequest(sogni) {
     const negativePrompt =
       'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
-    const batchSize = 1;
+    const batchSize = 1; // Discord set to 1 by default here
 
     let images = [];
     const maxNsfwRetries = 2;
@@ -217,26 +223,22 @@ async function processNextRequest(sogni) {
       if (attempt > 1) {
         channel.send(`**Attempt ${attempt}**: Generating...`);
       } else {
-        channel.send(`Generating...`);
+        //channel.send(`Generating...`);
       }
 
       images = await project.waitForCompletion();
 
       if (images.length === 0 && attempt < maxNsfwRetries) {
-        channel.send(
-          'No images generated — possibly NSFW filter false positive. Retrying...'
-        );
+        channel.send('No images generated — possibly NSFW filter false positive. Retrying...');
         continue;
       } else {
-        break; // we either have images or we’re at the final attempt
+        break; // we either have images or we’re at final attempt
       }
     }
 
     // If 0 images returned after all attempts, truly blocked by NSFW
     if (images.length === 0) {
-      channel.send(
-        'No images were generated (NSFW filter). Please try a safer prompt!'
-      );
+      channel.send('No images were generated (NSFW filter). Please try a safer prompt!');
       return;
     }
 
@@ -245,7 +247,7 @@ async function processNextRequest(sogni) {
       const removedCount = batchSize - images.length;
       channel.send(
         `Generated ${images.length} out of ${batchSize} image(s). ` +
-        `${removedCount} was removed by the NSFW filter.`
+          `${removedCount} was removed by the NSFW filter.`
       );
     }
 
@@ -277,6 +279,12 @@ async function processNextRequest(sogni) {
   }
 }
 
+/**
+ * processImage:
+ *  - Saves the image
+ *  - Removes background
+ *  - Sends the result in Discord
+ */
 async function processImage(imageUrl, channel, idx) {
   try {
     const filePath = path.join(__dirname, 'renders', `discord_${Date.now()}_${idx + 1}.png`);
