@@ -509,7 +509,7 @@ async function handleGenerationRequest(msg, prompt) {
 
   // Decide how many images to generate based on chat type
   const chatType = msg.chat.type; // "private" | "group" | "supergroup" | "channel"
-  let batchSize = 3; // default 3 for private
+  let batchSize = Number(process.env.DEFAULT_BATCH_SIZE);
 
   // Force 1 if group / supergroup / channel
   if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
