@@ -37,7 +37,7 @@ async function connectWithBackoff() {
     console.log(`Attempting to create SogniClient instance (attempt #${sogniRetryCount + 1})...`);
 
     const sogni = await SogniClient.createInstance({
-      appId: process.env.APP_ID,
+      appId: process.env.APP_ID + window.crypto.randomUUID(),
       testnet: true,
       network: 'fast'
     });
