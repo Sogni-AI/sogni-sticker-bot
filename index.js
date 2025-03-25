@@ -39,7 +39,9 @@ async function connectWithBackoff() {
     const sogni = await SogniClient.createInstance({
       appId: process.env.APP_ID,
       testnet: true,
-      network: 'fast'
+      network: 'fast',
+      restEndpoint: process.env.REST_ENDPOINT,
+      socketEndpoint: process.env.SOCKET_ENDPOINT,
     });
 
     // If we got here, it means we connected successfully.
