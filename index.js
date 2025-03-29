@@ -3,11 +3,6 @@ const fs = require('fs');
 const express = require('express');
 const { SogniClient } = require('@sogni-ai/sogni-client');
 
-// Exponential backoff settings
-let sogniRetryCount = 0;            // How many times we've retried Sogni so far
-const sogniMaxRetries = 1000;       // Increase if you want more attempts
-const sogniBaseDelayMs = 1000;      // First attempt delay in ms (gets doubled)
-
 // Express app setup
 const app = express();
 const port = process.env.PORT || 3004;
@@ -31,10 +26,13 @@ if (!telegramToken && !discordToken) {
   process.exit(1);
 }
 
-// Exponential Backoff Connection to Sogni
-async function connectWithBackoff() {
+/**
+ * Connect to the Sogni API.
+ * On error, we log and exit so that an external process (e.g. PM2) can restart us.
+ */
+async function connectSogni() {
   try {
-    console.log(`Attempting to create SogniClient instance (attempt #${sogniRetryCount + 1})...`);
+    console.log('Attempting to create SogniClient instance...');
 
     const sogni = await SogniClient.createInstance({
       appId: process.env.APP_ID,
@@ -44,11 +42,7 @@ async function connectWithBackoff() {
       socketEndpoint: process.env.SOCKET_ENDPOINT,
     });
 
-    // If we got here, it means we connected successfully.
     console.log('Sogni API client initialized successfully.');
-
-    // Reset the retry count on successful connect
-    sogniRetryCount = 0;
 
     // Attach event listeners
     sogni.apiClient.on('connected', () => {
@@ -57,8 +51,8 @@ async function connectWithBackoff() {
 
     sogni.apiClient.on('disconnected', ({ code, reason }) => {
       console.error('Disconnected from Sogni API', code, reason);
-      console.log('Attempting to reconnect to Sogni with exponential backoff...');
-      attemptReconnect();
+      console.log('Restarting process in 5 seconds...');
+      setTimeout(() => process.exit(1), 5000);
     });
 
     // Attempt to login
@@ -67,39 +61,14 @@ async function connectWithBackoff() {
     return sogni;
   } catch (error) {
     console.error('Error initializing Sogni API client:', error);
-
-    // If we have not exceeded max retries, schedule another attempt
-    if (sogniRetryCount < sogniMaxRetries) {
-      attemptReconnect();
-    } else {
-      console.error(`Max Sogni retries (${sogniMaxRetries}) reached. Exiting...`);
-      setTimeout(() => process.exit(1), 5000);
-    }
-    // Throw so that the caller sees the error
+    console.error('Exiting in 5 seconds...');
+    setTimeout(() => process.exit(1), 5000);
     throw error;
   }
 }
 
-// Helper to schedule the next reconnection
-function attemptReconnect() {
-  sogniRetryCount++;
-  // Exponential backoff, but cap it so we don't reach Infinity
-  const rawBackoff = Math.pow(2, sogniRetryCount) * sogniBaseDelayMs;
-  // Example: cap at 1 hour
-  const maxBackoffMs = 60 * 60 * 1000;
-  const backoffTime = Math.min(rawBackoff, maxBackoffMs);
-
-  console.log(`Reconnecting to Sogni in ${backoffTime / 1000} seconds... (attempt #${sogniRetryCount + 1})`);
-
-  setTimeout(() => {
-    connectWithBackoff().catch(() => {
-      // If it fails again, the function itself will repeat or exit.
-    });
-  }, backoffTime);
-}
-
 // Main Startup
-connectWithBackoff()
+connectSogni()
   .then((sogni) => {
     // Once Sogni is connected, we can start our bots.
     if (telegramToken) {
@@ -121,6 +90,5 @@ connectWithBackoff()
   })
   .catch((err) => {
     console.error('Could not start up fully due to Sogni initialization error:', err);
-    // We either exit now or let the backoff continue. The above logic handles retry,
-    // so typically we do not exit here.
+    // We rely on the setTimeout+exit inside connectSogni or here
   });

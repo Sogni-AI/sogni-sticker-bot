@@ -1,7 +1,3 @@
-// telegramBot.js
-// Purpose: Handles all Telegram bot logic, including receiving messages, processing image generation,
-// and sticker creation requests.
-
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
@@ -45,6 +41,10 @@ if (!token) {
 }
 console.log('Telegram bot token:', token);
 
+// Track polling errors so we don't spam restarts
+let retryCount = 0;
+const maxRetries = 9999;
+
 let bot = new TelegramBot(token, {
   polling: true,
   request: {
@@ -70,10 +70,6 @@ let channelConfig = loadChannelConfig();
 
 // We’ll store the sogni instance globally so we can refer to it in handlers
 let globalSogni = null;
-
-// Retry logic for polling errors
-let retryCount = 0;
-const maxRetries = 9999;
 
 /**
  * Utility: Check if user is channel admin or creator
@@ -150,6 +146,9 @@ function getThreadMessageOptions(msg) {
   return {};
 }
 
+/**
+ * Start the Telegram bot
+ */
 const startTelegramBot = (sogni) => {
   globalSogni = sogni;
 
@@ -179,7 +178,6 @@ const startTelegramBot = (sogni) => {
 
   /**
    * /start command
-   * Only trigger if the entire message is exactly "/start" (with optional thread info).
    */
   bot.onText(/^\/start$/, (msg) => {
     const chatId = msg.chat.id;
@@ -200,7 +198,7 @@ const startTelegramBot = (sogni) => {
    *  /clearwhitelist
    *  /clearblacklist
    *
-   *  ANYONE COMMANDS
+   *  ANYONE COMMAND
    *  /listwhitelist
    *
    *  ADMIN-ONLY
@@ -226,7 +224,6 @@ const startTelegramBot = (sogni) => {
     const userId = msg.from.id;
     const messageOptions = getThreadMessageOptions(msg);
 
-    // Check admin
     const admin = await isChannelAdmin(chatId, userId);
     if (!admin) {
       return bot.sendMessage(chatId, 'You are not allowed to use that command.', messageOptions);
@@ -243,20 +240,17 @@ const startTelegramBot = (sogni) => {
   // /addwhitelist
   bot.onText(/^\/addwhitelist (.+)/, async (msg, match) => {
     if (msg.chat.type === 'private') {
-      // No effect in private chat
-      return;
+      return; // No effect in private chat
     }
     const messageOptions = getThreadMessageOptions(msg);
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    // admin check
     const admin = await isChannelAdmin(chatId, userId);
     if (!admin) {
       return bot.sendMessage(chatId, 'You are not allowed to use that command.', messageOptions);
     }
 
-    // Only accept comma-separated; if there's any space, show error
     const wordsString = match[1].trim();
     if (/\s/.test(wordsString)) {
       return bot.sendMessage(
@@ -266,7 +260,6 @@ const startTelegramBot = (sogni) => {
       );
     }
 
-    // Now split by comma
     const wordsToAdd = wordsString
       .split(',')
       .map((w) => w.trim().toLowerCase())
@@ -276,7 +269,6 @@ const startTelegramBot = (sogni) => {
       channelConfig[chatId] = { whitelist: [], blacklist: [] };
     }
 
-    // Push each word if not already present
     const currentList = channelConfig[chatId].whitelist;
     let addedWords = [];
     for (const word of wordsToAdd) {
@@ -289,11 +281,7 @@ const startTelegramBot = (sogni) => {
     saveChannelConfig(channelConfig);
 
     if (addedWords.length === 0) {
-      return bot.sendMessage(
-        chatId,
-        'No new words were added (maybe they already exist?).',
-        messageOptions
-      );
+      return bot.sendMessage(chatId, 'No new words were added (maybe they already exist?).', messageOptions);
     } else {
       return bot.sendMessage(chatId, `Added to whitelist: ${addedWords.join(', ')}`, messageOptions);
     }
@@ -302,7 +290,7 @@ const startTelegramBot = (sogni) => {
   // /addblacklist
   bot.onText(/^\/addblacklist (.+)/, async (msg, match) => {
     if (msg.chat.type === 'private') {
-      return; // No effect in private chat
+      return;
     }
     const messageOptions = getThreadMessageOptions(msg);
     const chatId = msg.chat.id;
@@ -313,7 +301,6 @@ const startTelegramBot = (sogni) => {
       return bot.sendMessage(chatId, 'You are not allowed to use that command.', messageOptions);
     }
 
-    // Only accept comma-separated; if there's any space, show error
     const wordsString = match[1].trim();
     if (/\s/.test(wordsString)) {
       return bot.sendMessage(
@@ -323,7 +310,6 @@ const startTelegramBot = (sogni) => {
       );
     }
 
-    // Split by comma
     const wordsToAdd = wordsString
       .split(',')
       .map((w) => w.trim().toLowerCase())
@@ -345,11 +331,7 @@ const startTelegramBot = (sogni) => {
     saveChannelConfig(channelConfig);
 
     if (addedWords.length === 0) {
-      return bot.sendMessage(
-        chatId,
-        'No new words were added (maybe they already exist?).',
-        messageOptions
-      );
+      return bot.sendMessage(chatId, 'No new words were added (maybe they already exist?).', messageOptions);
     } else {
       return bot.sendMessage(chatId, `Added to blacklist: ${addedWords.join(', ')}`, messageOptions);
     }
@@ -409,7 +391,6 @@ const startTelegramBot = (sogni) => {
     const userMessage = msg.text && msg.text.toLowerCase();
     if (!userMessage) return;
 
-    // We'll always respond in the thread if it's a forum
     const messageOptions = getThreadMessageOptions(msg);
 
     // 1) Simple greetings logic
@@ -424,7 +405,6 @@ const startTelegramBot = (sogni) => {
         return;
       }
 
-      // If group/supergroup => only respond if message includes @botUsername
       if (botUsername) {
         const mentionRegex = new RegExp(`@${botUsername.toLowerCase()}`, 'i');
         if (mentionRegex.test(userMessage)) {
@@ -493,7 +473,25 @@ const startTelegramBot = (sogni) => {
     }
   });
 
-  bot.on('polling_error', handlePollingError);
+  /**
+   * If polling fails, exit so PM2 (or another manager) can restart us
+   */
+  bot.on('polling_error', (error) => {
+    console.error('Polling error:', error);
+    console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
+
+    if (retryCount >= maxRetries) {
+      console.error('Max retries reached. Bot is stopping in 5 seconds...');
+      setTimeout(() => {
+        process.exit(1);
+      }, 5000);
+      return;
+    }
+
+    retryCount++;
+    console.log('Restarting process in 5 seconds due to polling error...');
+    setTimeout(() => process.exit(1), 5000);
+  });
 };
 
 /**
@@ -518,13 +516,12 @@ async function handleGenerationRequest(msg, prompt) {
 
   // If private, allow user to override with (NN) syntax, e.g. "!generate cat (5)"
   if (chatType === 'private') {
-    const match = prompt.match(/\((\d+)\)\s*$/);
+    const match = prompt.match(/\(\d+?\)\s*$/);
     if (match) {
-      let requestedCount = parseInt(match[1], 10);
+      let requestedCount = parseInt(match[0].replace(/[()]/g, ''), 10);
       if (requestedCount > 16) requestedCount = 16; // limit for safety
       batchSize = requestedCount;
-      // remove the trailing (NN)
-      prompt = prompt.replace(/\(\d+\)\s*$/, '').trim();
+      prompt = prompt.replace(/\(\d+?\)\s*$/, '').trim();
     }
   }
 
@@ -550,22 +547,15 @@ async function handleGenerationRequest(msg, prompt) {
 async function performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions) {
   const chatId = msg.chat.id;
 
-  /**
-   * Step 2 explanation (important):
-   * Attempt to generate images twice if any are removed by NSFW filtering. 
-   * If the first attempt returns fewer images than requested, do one more attempt
-   * with the same prompt before telling the user some images were removed.
-   */
   try {
     const style = 'One big Sticker, thin white outline, cartoon, solid green screen background';
     const negativePrompt = 'Pencil, pen, hands, malformation, bad anatomy, bad hands, missing fingers, cropped, low quality, bad quality, jpeg artifacts, watermark';
     const model = 'flux1-schnell-fp8';
 
-    // We will accumulate images across up to 2 attempts.
+    // Attempt up to 2 times if NSFW filter removes some images
     const allImages = [];
     const maxNsfwRetries = 2;
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
-      // Create the project
       let project = await globalSogni.projects.create({
         modelId: model,
         positivePrompt: prompt,
@@ -585,26 +575,16 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       const attemptImages = await project.waitForCompletion();
       console.log(`Project ${project.id} completed. Received ${attemptImages.length} images.`);
 
-      // Accumulate valid images from this attempt
       if (attemptImages.length > 0) {
         allImages.push(...attemptImages);
       }
-
-      // If we got enough images, no need to attempt again
       if (allImages.length >= batchSize) {
         break;
-      } else if (attempt < maxNsfwRetries) {
-        console.log(
-          `We got ${attemptImages.length} images in attempt ${attempt}, ` +
-            `total so far = ${allImages.length}, but wanted ${batchSize}. Retrying...`
-        );
       }
     }
 
     const images = allImages;
-
     if (images.length === 0) {
-      // fully blocked by NSFW
       msg.reply('No images were generated — possibly blocked by the NSFW filter. Please try a safer prompt!', messageOptions);
       return;
     }
@@ -640,11 +620,11 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       }
     }
 
-    // If we are NOT in a forum thread, send a final note
     if (!messageOptions.message_thread_id) {
       bot.sendMessage(chatId, 'Here you go! Right-click / long-press to save them!', messageOptions);
     }
   } catch (error) {
+    // If invalid token
     if (
       error &&
       error.status === 401 &&
@@ -657,6 +637,25 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       }, 5000);
       return;
     }
+
+    // If WebSocket not connected
+    if (error.message && error.message.includes('WebSocket not connected')) {
+      console.error('Detected "WebSocket not connected" error, restarting in 5 seconds...');
+      setTimeout(() => {
+        process.exit(1);
+      }, 5000);
+      return;
+    }
+
+    // If "Project not found"
+    if (error.message && error.message.includes('Project not found')) {
+      console.error('Detected "Project not found" error, restarting in 5 seconds...');
+      setTimeout(() => {
+        process.exit(1);
+      }, 5000);
+      return;
+    }
+
     console.error('Error performing generation:', error);
     bot.sendMessage(chatId, 'An error occurred during generation. Please try again later.', messageOptions);
   }
@@ -702,67 +701,6 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
   } else {
     throw new Error(`Sticker file not found: ${stickerFilePath}`);
   }
-}
-
-/**
- * handlePollingError: Called whenever the Telegram polling fails.
- * We do an exponential backoff. If the error is a 429, factor in Telegram’s recommended "retry_after".
- */
-function handlePollingError(error) {
-  console.error('Polling error:', error);
-  console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
-
-  if (retryCount >= maxRetries) {
-    console.error('Max retries reached. Bot is stopping in 5 seconds...');
-    setTimeout(() => {
-      process.exit(1);
-    }, 5000);
-    return;
-  }
-
-  // Exponential backoff
-  let rawBackoffTime = Math.pow(2, retryCount) * 1000;
-  // Cap at 1 hour
-  const maxBackoffTime = 60 * 60 * 1000;
-  let backoffTime = Math.min(rawBackoffTime, maxBackoffTime);
-
-  // If we get a 429 from Telegram, they often supply a "retry_after"
-  if (
-    error.code === 'ETELEGRAM' &&
-    error.response &&
-    error.response.body
-  ) {
-    try {
-      const body = JSON.parse(error.response.body);
-      if (body.error_code === 429 && body.parameters && body.parameters.retry_after) {
-        const retryAfter = body.parameters.retry_after;
-        const recommendedWait = (retryAfter + 1) * 1000;
-        backoffTime = Math.max(backoffTime, recommendedWait);
-        console.log(`Detected 429. Respecting Telegram retry_after=${retryAfter}s`);
-      }
-    } catch (jsonErr) {
-      console.error('Error parsing Telegram error response body:', jsonErr);
-    }
-  }
-
-  retryCount++;
-  console.log(`Retrying in ${backoffTime / 1000} seconds... (attempt ${retryCount})`);
-
-  setTimeout(() => {
-    bot = new TelegramBot(token, {
-      polling: true,
-      request: {
-        agentOptions: {
-          keepAlive: true,
-          family: 4,
-        },
-      },
-    });
-    console.log('Restarting Telegram bot after polling error...');
-    if (globalSogni) {
-      startTelegramBot(globalSogni);
-    }
-  }, backoffTime);
 }
 
 module.exports = startTelegramBot;
