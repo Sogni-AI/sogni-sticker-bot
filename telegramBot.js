@@ -534,8 +534,8 @@ async function handleGenerationRequest(msg, prompt) {
       performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions),
       new Promise((_, reject) => {
         setTimeout(() => {
-          reject(new Error('Request timed out after 30s'));
-        }, 30000);
+          reject(new Error('Request timed out after 1 minute'));
+        }, 60000);
       }),
     ]);
   } catch (err) {
@@ -626,8 +626,8 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
           processSingleImage(images[i], i, chatId, messageOptions),
           new Promise((_, reject) => {
             setTimeout(() => {
-              reject(new Error(`Timeout exceeded: 30s for image #${i + 1}`));
-            }, 30000);
+              reject(new Error(`Timeout exceeded: 1 minute for image #${i + 1}`));
+            }, 60000);
           }),
         ]);
       } catch (error) {
