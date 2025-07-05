@@ -209,6 +209,7 @@ async function processNextRequest(sogni) {
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
       // Create the project
       let project = await sogni.projects.create({
+        tokenType: "spark",
         modelId: model,
         positivePrompt: prompt,
         negativePrompt: negativePrompt,

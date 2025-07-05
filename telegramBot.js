@@ -557,6 +557,7 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
     const maxNsfwRetries = 2;
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
       let project = await globalSogni.projects.create({
+        tokenType: "spark",
         modelId: model,
         positivePrompt: prompt,
         negativePrompt: negativePrompt,
@@ -657,8 +658,8 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
     }
 
     if (error.message && error.message.includes('Insufficient funds')) {
-      msg.reply(error.message, messageOptions);
       console.error(error.message);
+      bot.sendMessage(chatId, 'Sorry stickerbot is out of funds. Please request to top up!', messageOptions);
       return;
     }
 
