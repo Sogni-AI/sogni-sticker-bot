@@ -656,6 +656,12 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       return;
     }
 
+    if (error.message && error.message.includes('Insufficient funds')) {
+      msg.reply(error.message, messageOptions);
+      console.error(error.message);
+      return;
+    }
+
     console.error('Error performing generation:', error);
     bot.sendMessage(chatId, 'An error occurred during generation. Please try again later.', messageOptions);
   }

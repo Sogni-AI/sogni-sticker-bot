@@ -36,7 +36,6 @@ async function connectSogni() {
 
     const sogni = await SogniClient.createInstance({
       appId: process.env.APP_ID,
-      testnet: true,
       network: 'fast',
       restEndpoint: process.env.REST_ENDPOINT,
       socketEndpoint: process.env.SOCKET_ENDPOINT,
