@@ -84,14 +84,20 @@ function attachEventListeners(client) {
 
     // ---- Handle commands ----
     if (command === 'start') {
-      message.channel.send('Good day! Use `!generate [your prompt]` or `!imagine [your prompt]` to create an image.');
+      message.channel.send(
+        'Good day! I can create stickers and videos for you!\n\n' +
+          'Use `!generate [your prompt]` or `!imagine [your prompt]` to create stickers.\n' +
+          'Use `!video [your prompt]` to create a 5 second video.\n\n' +
+          'Type `!help` to see all available commands.'
+      );
     }
     else if (command === 'help') {
       message.channel.send(
         'Available commands:\n' +
           '`!start` - Start interaction with the bot.\n' +
-          '`!generate [prompt]` - Generate images.\n' +
+          '`!generate [prompt]` - Generate stickers.\n' +
           '`!imagine [prompt]` - Same as !generate.\n' +
+          '`!video [prompt]` - Generate a 5 second video.\n' +
           '`!repeat` - Generate more images with your last prompt.\n' +
           '`!help` - Show this help message.'
       );
@@ -127,6 +133,31 @@ function attachEventListeners(client) {
 
       processNextRequest(sogniRef);
     }
+    else if (command === 'video') {
+      const prompt = args.join(' ');
+      if (!prompt) {
+        message.channel.send('Please provide a prompt. Usage: `!video [your prompt]`.');
+        return;
+      }
+
+      if (pendingUsers.has(userId)) {
+        message.channel.send('You already have a pending request. Please wait until it\'s processed.');
+        return;
+      }
+
+      // Queue video request
+      requestQueue.push({ userId, channel: message.channel, prompt, isVideo: true });
+      pendingUsers.add(userId);
+
+      if (isProcessing) {
+        const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
+        message.channel.send(`Your video request is queued. You are number ${positionInQueue} in the queue.`);
+      } else {
+        message.channel.send(`Generating 5 second video for: ${prompt}\n(This can take up to 5 minutes)`);
+      }
+
+      processNextRequest(sogniRef);
+    }
     else if (command === 'repeat') {
       // Use the last prompt
       const lastPrompt = lastPromptByUser[userId];
@@ -136,7 +167,7 @@ function attachEventListeners(client) {
       }
 
       if (pendingUsers.has(userId)) {
-        message.channel.send('You already have a pending request. Please wait until it’s processed.');
+        message.channel.send('You already have a pending request. Please wait until it\'s processed.');
         return;
       }
 
@@ -192,7 +223,13 @@ async function processNextRequest(sogni) {
 
   isProcessing = true;
 
-  const { userId, channel, prompt } = requestQueue.shift();
+  const { userId, channel, prompt, isVideo } = requestQueue.shift();
+
+  // If this is a video request, handle it separately
+  if (isVideo) {
+    await handleVideoRequest(sogni, channel, prompt, userId);
+    return;
+  }
 
   // Wrap main request logic
   const handleRequest = async () => {
@@ -209,6 +246,7 @@ async function processNextRequest(sogni) {
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
       // Create the project
       let project = await sogni.projects.create({
+        type: 'image',
         tokenType: "spark",
         modelId: model,
         positivePrompt: prompt,
@@ -216,9 +254,9 @@ async function processNextRequest(sogni) {
         stylePrompt: style,
         steps: 4,
         guidance: 1,
-        numberOfImages: batchSize,
-        scheduler: 'Euler',
-        timeStepSpacing: 'Linear',
+        numberOfMedia: batchSize,
+        sampler: 'Euler',
+        scheduler: 'linear',
       });
 
       if (attempt > 1) {
@@ -314,6 +352,80 @@ async function processImage(imageUrl, channel, idx) {
   } catch (err) {
     console.error('Error processing image:', err);
     channel.send('Error occurred while processing an image. Skipping...');
+  }
+}
+
+/**
+ * Handle video generation request for Discord
+ */
+async function handleVideoRequest(sogni, channel, prompt, userId) {
+  const performVideoGeneration = async () => {
+    const model = 'wan_v2.2-14b-fp8_t2v'; // Text-to-video model
+    const fps = 16;
+    const frames = 80; // 5 seconds at 16fps = 80 frames
+
+    console.log(`Creating video project with prompt: "${prompt}"`);
+
+    let project = await sogni.projects.create({
+      type: 'video',
+      tokenType: "spark",
+      modelId: model,
+      positivePrompt: prompt,
+      negativePrompt: 'low quality, blurry, distorted',
+      stylePrompt: '',
+      steps: 20,
+      guidance: 7,
+      numberOfMedia: 1,
+      fps: fps,
+      frames: frames,
+      network: 'fast',
+    });
+
+    console.log(`Video project created: ${project.id}`);
+    channel.send('Video project created, waiting for completion...');
+
+    const videos = await project.waitForCompletion();
+    console.log(`Video project ${project.id} completed. Received ${videos.length} video(s).`);
+
+    if (videos.length === 0) {
+      channel.send('No video was generated. Please try a different prompt!');
+      return;
+    }
+
+    // Download and send the video
+    const videoUrl = videos[0];
+    const videoFilePath = path.join(__dirname, 'renders', `discord_video_${Date.now()}.mp4`);
+
+    await saveFile(videoFilePath, videoUrl);
+    console.log(`Saved video to ${videoFilePath}`);
+
+    // Send the video as an attachment
+    if (fs.existsSync(videoFilePath)) {
+      const attachment = new AttachmentBuilder(videoFilePath, { name: 'sogni_video.mp4' });
+      await channel.send({ files: [attachment] });
+      channel.send('Here is your video!');
+    } else {
+      throw new Error(`Video file not found: ${videoFilePath}`);
+    }
+  };
+
+  try {
+    // Race video generation against a 6-minute timeout (can take up to 5 minutes)
+    await Promise.race([
+      performVideoGeneration(),
+      new Promise((_, reject) =>
+        setTimeout(() => {
+          reject(new Error('Timeout exceeded: 6 minutes'));
+        }, 360000)
+      ),
+    ]);
+  } catch (error) {
+    console.error('Error or timeout performing video generation:', error);
+    channel.send('Your video request took too long (over 6 minutes) or encountered an error. Please try again.');
+  } finally {
+    pendingUsers.delete(userId);
+    isProcessing = false;
+    processNextRequest(sogni);
   }
 }
 

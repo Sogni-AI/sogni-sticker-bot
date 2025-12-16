@@ -163,6 +163,7 @@ const startTelegramBot = (sogni) => {
 - **/start** - Basic start message
 - **!generate <prompt>** - Generate stickers
 - **!imagine <prompt>** - (same as !generate)
+- **!video <prompt>** - Generate a 5 second video
 - **!repeat** - Generate more images with your last prompt
 
 - **/addwhitelist** - Add comma-separated words to this channel's whitelist (admin-only)
@@ -185,7 +186,10 @@ const startTelegramBot = (sogni) => {
 
     bot.sendMessage(
       chatId,
-      'Good day! What would you like me to create a sticker of? Use "!generate Your prompt..." or "!imagine Your prompt...".',
+      'Good day! I can create stickers and videos for you!\n\n' +
+        'Use "!generate <prompt>" or "!imagine <prompt>" to create stickers.\n' +
+        'Use "!video <prompt>" to create a 5 second video.\n\n' +
+        'Type /help to see all available commands.',
       messageOptions
     );
   });
@@ -459,14 +463,42 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
+    // 3.5) Video command: "!video"
+    if (userMessage.startsWith('!video')) {
+      // If we are in a group / supergroup, check whitelist/blacklist
+      if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
+        const { isValid, hasBlacklistedWords, missingWhitelistWords } = validateMessage(chatId, userMessage);
+        if (!isValid) {
+          if (hasBlacklistedWords) {
+            bot.sendMessage(chatId, `You can't use blacklisted words in your prompt. Please try again.`, messageOptions);
+          } else if (missingWhitelistWords.length > 0) {
+            bot.sendMessage(
+              chatId,
+              `You must include at least one of the following whitelisted words: ${missingWhitelistWords.join(', ')}.`,
+              messageOptions
+            );
+          }
+          return;
+        }
+      }
+
+      // Strip out the leading "!video" and get the prompt
+      let userPrompt = msg.text.replace(/^!video\b\s*/i, '').trim();
+      bot.sendMessage(chatId, `Generating 5 second video for: ${userPrompt}\n(This can take up to 5 minutes)`, messageOptions);
+
+      handleVideoRequest(msg, userPrompt);
+      return;
+    }
+
     // 4) If in private chat with unrecognized command:
     if (msg.chat.type === 'private') {
       bot.sendMessage(
         chatId,
-        `Hello! I am your AI sticker bot. Here are some things you can do:\n` +
+        `Hello! I am your AI sticker and video bot. Here are some things you can do:\n` +
           `- /start to see a welcome message\n` +
           `- /help to see more commands\n` +
           `- !generate <your prompt> or !imagine <your prompt> to create stickers\n` +
+          `- !video <your prompt> to create a 5 second video\n` +
           `- !repeat to create more using your last prompt`,
         messageOptions
       );
@@ -542,6 +574,29 @@ async function handleGenerationRequest(msg, prompt) {
 }
 
 /**
+ * Handle video generation request
+ */
+async function handleVideoRequest(msg, prompt) {
+  const chatId = msg.chat.id;
+  const messageOptions = getThreadMessageOptions(msg);
+
+  try {
+    // 6-minute timeout for video generation (can take up to 5 minutes)
+    await Promise.race([
+      performVideoGeneration(prompt, msg, messageOptions),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Request timed out after 6 minutes'));
+        }, 360000);
+      }),
+    ]);
+  } catch (err) {
+    console.error('Error or timeout while processing video request:', err);
+    bot.sendMessage(chatId, 'Sorry, your video request took too long or encountered an error. Please try again.', messageOptions);
+  }
+}
+
+/**
  * Actually talk to Sogni, get images, and process them into stickers.
  */
 async function performGenerationAndSendStickers(prompt, batchSize, msg, messageOptions) {
@@ -557,6 +612,7 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
     const maxNsfwRetries = 2;
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
       let project = await globalSogni.projects.create({
+        type: 'image',
         tokenType: "spark",
         modelId: model,
         positivePrompt: prompt,
@@ -564,9 +620,9 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
         stylePrompt: style,
         steps: 4,
         guidance: 1,
-        numberOfImages: batchSize,
-        scheduler: 'Euler',
-        timeStepSpacing: 'Linear',
+        numberOfMedia: batchSize,
+        sampler: 'Euler',
+        scheduler: 'linear',
         sizePreset: 'custom',
         width: 512,
         height: 512,
@@ -707,6 +763,85 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
     await bot.sendSticker(chatId, fs.createReadStream(stickerFilePath), threadOptions);
   } else {
     throw new Error(`Sticker file not found: ${stickerFilePath}`);
+  }
+}
+
+/**
+ * Generate a video using Sogni API
+ */
+async function performVideoGeneration(prompt, msg, messageOptions) {
+  const chatId = msg.chat.id;
+
+  try {
+    const model = 'wan_v2.2-14b-fp8_t2v'; // Text-to-video model
+    const fps = 16;
+    const frames = 80; // 5 seconds at 16fps = 80 frames
+
+    console.log(`Creating video project with prompt: "${prompt}"`);
+
+    let project = await globalSogni.projects.create({
+      type: 'video',
+      tokenType: "spark",
+      modelId: model,
+      positivePrompt: prompt,
+      negativePrompt: 'low quality, blurry, distorted',
+      stylePrompt: '',
+      steps: 20,
+      guidance: 7,
+      numberOfMedia: 1,
+      fps: fps,
+      frames: frames,
+      network: 'fast',
+    });
+
+    console.log(`Video project created: ${project.id}`);
+    bot.sendMessage(chatId, 'Video project created, waiting for completion...', messageOptions);
+
+    const videos = await project.waitForCompletion();
+    console.log(`Video project ${project.id} completed. Received ${videos.length} video(s).`);
+
+    if (videos.length === 0) {
+      bot.sendMessage(chatId, 'No video was generated. Please try a different prompt!', messageOptions);
+      return;
+    }
+
+    // Download and send the video
+    const videoUrl = videos[0];
+    const videoFilePath = `renders/telegram_video_${Date.now()}.mp4`;
+
+    await saveFile(videoFilePath, videoUrl);
+    console.log(`Saved video to ${videoFilePath}`);
+
+    // Send the video
+    if (fs.existsSync(videoFilePath)) {
+      await bot.sendVideo(chatId, fs.createReadStream(videoFilePath), messageOptions);
+      bot.sendMessage(chatId, 'Here is your video!', messageOptions);
+    } else {
+      throw new Error(`Video file not found: ${videoFilePath}`);
+    }
+
+  } catch (error) {
+    // Handle specific errors
+    if (error && error.status === 401 && error.payload && error.payload.errorCode === 107) {
+      console.error('Detected invalid token, restarting process in 5 seconds...');
+      setTimeout(() => process.exit(1), 5000);
+      return;
+    }
+
+    if (error.message && error.message.includes('WebSocket not connected')) {
+      console.error('Detected "WebSocket not connected" error, restarting in 5 seconds...');
+      setTimeout(() => process.exit(1), 5000);
+      return;
+    }
+
+    if (error.message && error.message.includes('Insufficient funds')) {
+      console.error(error.message);
+      bot.sendMessage(chatId, 'Sorry, the bot is out of funds. Please request to top up!', messageOptions);
+      return;
+    }
+
+    console.error('Error performing video generation:', error);
+    bot.sendMessage(chatId, 'An error occurred during video generation. Please try again later.', messageOptions);
   }
 }
 
