@@ -8,6 +8,79 @@ const removeImageBg = require('./lib/removeImageBgOriginal');
 // Load the Discord token from the environment variables
 const token = process.env.DISCORD_BOT_TOKEN;
 
+// Video rate limiting
+const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimitDiscord.json');
+const MAX_VIDEOS_PER_DAY = 3;
+
+// Helper to load video rate limit data
+function loadVideoRateLimits() {
+  try {
+    if (!fs.existsSync(VIDEO_RATE_LIMIT_PATH)) {
+      fs.writeFileSync(VIDEO_RATE_LIMIT_PATH, JSON.stringify({}, null, 2));
+    }
+    const data = fs.readFileSync(VIDEO_RATE_LIMIT_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Failed to load video rate limits:', error);
+    return {};
+  }
+}
+
+// Helper to save video rate limit data
+function saveVideoRateLimits(limits) {
+  try {
+    fs.writeFileSync(VIDEO_RATE_LIMIT_PATH, JSON.stringify(limits, null, 2));
+  } catch (error) {
+    console.error('Failed to save video rate limits:', error);
+  }
+}
+
+// Get current UTC day as a string (YYYY-MM-DD)
+function getCurrentUTCDay() {
+  const now = new Date();
+  return now.toISOString().split('T')[0];
+}
+
+// Check if user can make a video request, returns { allowed: boolean, remaining: number }
+function checkVideoRateLimit(username) {
+  const rateLimits = loadVideoRateLimits();
+  const today = getCurrentUTCDay();
+
+  if (!rateLimits[username]) {
+    rateLimits[username] = { day: today, count: 0 };
+  }
+
+  // Reset count if it's a new day
+  if (rateLimits[username].day !== today) {
+    rateLimits[username] = { day: today, count: 0 };
+  }
+
+  const remaining = MAX_VIDEOS_PER_DAY - rateLimits[username].count;
+  const allowed = rateLimits[username].count < MAX_VIDEOS_PER_DAY;
+
+  return { allowed, remaining };
+}
+
+// Increment video request count for user
+function incrementVideoCount(username) {
+  const rateLimits = loadVideoRateLimits();
+  const today = getCurrentUTCDay();
+
+  if (!rateLimits[username] || rateLimits[username].day !== today) {
+    rateLimits[username] = { day: today, count: 0 };
+  }
+
+  rateLimits[username].count++;
+  saveVideoRateLimits(rateLimits);
+
+  const remaining = MAX_VIDEOS_PER_DAY - rateLimits[username].count;
+
+  // Log the increment with username and current count
+  console.log(`[Discord Video Counter] User: ${username} | Used: ${rateLimits[username].count}/${MAX_VIDEOS_PER_DAY} | Remaining: ${remaining} | Date: ${today}`);
+
+  return remaining;
+}
+
 // Exponential backoff for Discord
 let discordRetryCount = 0;
 const discordMaxRetries = 1000;
@@ -145,15 +218,32 @@ function attachEventListeners(client) {
         return;
       }
 
+      // Check rate limit using username
+      const username = message.author.username || `user_${message.author.id}`;
+      const { allowed, remaining } = checkVideoRateLimit(username);
+
+      if (!allowed) {
+        message.channel.send(`You've reached your daily limit of ${MAX_VIDEOS_PER_DAY} videos. Please try again tomorrow (resets at UTC midnight).`);
+        return;
+      }
+
+      // Increment the count
+      const remainingAfter = incrementVideoCount(username);
+
       // Queue video request
-      requestQueue.push({ userId, channel: message.channel, prompt, isVideo: true });
+      requestQueue.push({ userId, channel: message.channel, prompt, isVideo: true, username });
       pendingUsers.add(userId);
 
       if (isProcessing) {
         const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
-        message.channel.send(`Your video request is queued. You are number ${positionInQueue} in the queue.`);
+        const totalInQueue = requestQueue.length;
+        message.channel.send(
+          `Your video request has been queued! You are position ${positionInQueue} of ${totalInQueue} in the queue.\n` +
+          `Your video will be generated once the previous one completes.\n\n` +
+          `You have ${remainingAfter} video${remainingAfter === 1 ? '' : 's'} left today!`
+        );
       } else {
-        message.channel.send(`Generating 5 second video for: ${prompt}\n(This can take up to 5 minutes)`);
+        message.channel.send(`Generating 5 second video for: ${prompt}\n(This can take up to 5 minutes)\n\nYou have ${remainingAfter} video${remainingAfter === 1 ? '' : 's'} left today!`);
       }
 
       processNextRequest(sogniRef);

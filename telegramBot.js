@@ -9,6 +9,10 @@ const convertImageToSticker = require('./lib/convertImageToSticker');
 // Path to your channel config file
 const CHANNEL_CONFIG_PATH = path.join(__dirname, 'channelConfig.json');
 
+// Path to video rate limit tracking file
+const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimit.json');
+const MAX_VIDEOS_PER_DAY = 3;
+
 // Helper to load config
 function loadChannelConfig() {
   try {
@@ -31,6 +35,75 @@ function saveChannelConfig(config) {
   } catch (error) {
     console.error('Failed to save channel config:', error);
   }
+}
+
+// Helper to load video rate limit data
+function loadVideoRateLimits() {
+  try {
+    if (!fs.existsSync(VIDEO_RATE_LIMIT_PATH)) {
+      fs.writeFileSync(VIDEO_RATE_LIMIT_PATH, JSON.stringify({}, null, 2));
+    }
+    const data = fs.readFileSync(VIDEO_RATE_LIMIT_PATH, 'utf-8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Failed to load video rate limits:', error);
+    return {};
+  }
+}
+
+// Helper to save video rate limit data
+function saveVideoRateLimits(limits) {
+  try {
+    fs.writeFileSync(VIDEO_RATE_LIMIT_PATH, JSON.stringify(limits, null, 2));
+  } catch (error) {
+    console.error('Failed to save video rate limits:', error);
+  }
+}
+
+// Get current UTC day as a string (YYYY-MM-DD)
+function getCurrentUTCDay() {
+  const now = new Date();
+  return now.toISOString().split('T')[0];
+}
+
+// Check if user can make a video request, returns { allowed: boolean, remaining: number }
+function checkVideoRateLimit(username) {
+  const rateLimits = loadVideoRateLimits();
+  const today = getCurrentUTCDay();
+
+  if (!rateLimits[username]) {
+    rateLimits[username] = { day: today, count: 0 };
+  }
+
+  // Reset count if it's a new day
+  if (rateLimits[username].day !== today) {
+    rateLimits[username] = { day: today, count: 0 };
+  }
+
+  const remaining = MAX_VIDEOS_PER_DAY - rateLimits[username].count;
+  const allowed = rateLimits[username].count < MAX_VIDEOS_PER_DAY;
+
+  return { allowed, remaining };
+}
+
+// Increment video request count for user
+function incrementVideoCount(username) {
+  const rateLimits = loadVideoRateLimits();
+  const today = getCurrentUTCDay();
+
+  if (!rateLimits[username] || rateLimits[username].day !== today) {
+    rateLimits[username] = { day: today, count: 0 };
+  }
+
+  rateLimits[username].count++;
+  saveVideoRateLimits(rateLimits);
+
+  const remaining = MAX_VIDEOS_PER_DAY - rateLimits[username].count;
+
+  // Log the increment with username and current count
+  console.log(`[Telegram Video Counter] User: ${username} | Used: ${rateLimits[username].count}/${MAX_VIDEOS_PER_DAY} | Remaining: ${remaining} | Date: ${today}`);
+
+  return remaining;
 }
 
 // Load the Telegram token from the .env file
@@ -145,6 +218,10 @@ function getThreadMessageOptions(msg) {
   }
   return {};
 }
+
+// Video request queue for Telegram
+let videoQueue = [];
+let isProcessingVideo = false;
 
 /**
  * Start the Telegram bot
@@ -484,9 +561,47 @@ const startTelegramBot = (sogni) => {
 
       // Strip out the leading "!video" and get the prompt
       let userPrompt = msg.text.replace(/^!video\b\s*/i, '').trim();
-      bot.sendMessage(chatId, `Generating 5 second video for: ${userPrompt}\n(This can take up to 5 minutes)`, messageOptions);
 
-      handleVideoRequest(msg, userPrompt);
+      // Check rate limit using username
+      const username = msg.from.username || `user_${msg.from.id}`;
+      const { allowed, remaining } = checkVideoRateLimit(username);
+
+      if (!allowed) {
+        bot.sendMessage(
+          chatId,
+          `You've reached your daily limit of ${MAX_VIDEOS_PER_DAY} videos. Please try again tomorrow (resets at UTC midnight).`,
+          messageOptions
+        );
+        return;
+      }
+
+      // Increment the count
+      const remainingAfter = incrementVideoCount(username);
+
+      // Add to video queue
+      videoQueue.push({ msg, prompt: userPrompt, username });
+
+      if (isProcessingVideo) {
+        // Someone else is already processing a video
+        const position = videoQueue.length;
+        const total = videoQueue.length;
+        bot.sendMessage(
+          chatId,
+          `Your video request has been queued! You are position ${position} of ${total} in the queue.\n` +
+          `Your video will be generated once the previous one completes.\n\n` +
+          `You have ${remainingAfter} video${remainingAfter === 1 ? '' : 's'} left today!`,
+          messageOptions
+        );
+      } else {
+        // Start processing immediately
+        bot.sendMessage(
+          chatId,
+          `Generating 5 second video for: ${userPrompt}\n(This can take up to 5 minutes)\n\nYou have ${remainingAfter} video${remainingAfter === 1 ? '' : 's'} left today!`,
+          messageOptions
+        );
+        processNextVideo();
+      }
+
       return;
     }
 
@@ -570,6 +685,26 @@ async function handleGenerationRequest(msg, prompt) {
   } catch (err) {
     console.error('Error or timeout while processing generation request:', err);
     bot.sendMessage(chatId, 'Sorry, your request took too long or encountered an error. Please try again.', messageOptions);
+  }
+}
+
+/**
+ * Process the next video in the queue
+ */
+async function processNextVideo() {
+  if (isProcessingVideo) return;
+  if (videoQueue.length === 0) return;
+
+  isProcessingVideo = true;
+
+  const { msg, prompt, username } = videoQueue.shift();
+
+  await handleVideoRequest(msg, prompt);
+
+  // Process next video in queue
+  isProcessingVideo = false;
+  if (videoQueue.length > 0) {
+    processNextVideo();
   }
 }
 
