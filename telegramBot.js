@@ -908,7 +908,7 @@ async function performVideoGeneration(prompt, msg, messageOptions) {
   const chatId = msg.chat.id;
 
   try {
-    const model = 'wan_v2.2-14b-fp8_t2v'; // Text-to-video model
+    const model = 'wan_v2.2-14b-fp8_t2v_lightx2v'; // Text-to-video model (speed variant)
     const fps = 16;
     const frames = 80; // 5 seconds at 16fps = 80 frames
 
@@ -921,7 +921,7 @@ async function performVideoGeneration(prompt, msg, messageOptions) {
       positivePrompt: prompt,
       negativePrompt: 'low quality, blurry, distorted',
       stylePrompt: '',
-      steps: 20,
+      steps: 4,
       guidance: 7,
       numberOfMedia: 1,
       fps: fps,
