@@ -3,3 +3,5 @@ node_modules
 renders/
 .env
 channelConfig.json
+videoRateLimit.json
+videoRateLimitDiscord.json

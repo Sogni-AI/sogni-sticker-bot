@@ -2,6 +2,7 @@ require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 const saveFile = require('./lib/saveFile');
 const removeImageBg = require('./lib/removeImageBgOriginal');
 const convertImageToSticker = require('./lib/convertImageToSticker');
@@ -11,7 +12,7 @@ const CHANNEL_CONFIG_PATH = path.join(__dirname, 'channelConfig.json');
 
 // Path to video rate limit tracking file
 const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimit.json');
-const MAX_VIDEOS_PER_DAY = 3;
+const MAX_VIDEOS_PER_DAY = 10;
 
 // Helper to load config
 function loadChannelConfig() {
@@ -106,6 +107,75 @@ function incrementVideoCount(username) {
   return remaining;
 }
 
+/**
+ * Process image for video generation
+ * Resizes to 512px max (for faster generation) while maintaining aspect ratio
+ * Ensures BOTH dimensions are divisible by 2 and within 480-512 range
+ * Returns { buffer, width, height, wasResized }
+ */
+async function processImageForVideo(imagePath) {
+  const MIN_VIDEO_DIMENSION = 480;
+  const TARGET_MAX_DIMENSION = 512; // Target 512px for fast generation
+
+  // Get image metadata to determine original dimensions
+  const metadata = await sharp(imagePath).metadata();
+  let originalWidth = metadata.width;
+  let originalHeight = metadata.height;
+
+  let targetWidth = originalWidth;
+  let targetHeight = originalHeight;
+
+  // Step 1: Scale to fit within TARGET_MAX (512px) while maintaining aspect ratio
+  if (originalWidth > TARGET_MAX_DIMENSION || originalHeight > TARGET_MAX_DIMENSION) {
+    const scaleFactor = Math.min(
+      TARGET_MAX_DIMENSION / originalWidth,
+      TARGET_MAX_DIMENSION / originalHeight
+    );
+
+    targetWidth = Math.floor(originalWidth * scaleFactor);
+    targetHeight = Math.floor(originalHeight * scaleFactor);
+  }
+
+  // Step 2: Ensure BOTH dimensions meet minimum (480px)
+  // If either dimension is below 480, scale up the smaller dimension to 480
+  if (targetWidth < MIN_VIDEO_DIMENSION || targetHeight < MIN_VIDEO_DIMENSION) {
+    // Scale so the smaller dimension becomes exactly 480
+    const scaleFactor = Math.max(
+      MIN_VIDEO_DIMENSION / targetWidth,
+      MIN_VIDEO_DIMENSION / targetHeight
+    );
+
+    targetWidth = Math.floor(targetWidth * scaleFactor);
+    targetHeight = Math.floor(targetHeight * scaleFactor);
+  }
+
+  // Step 3: Ensure dimensions are even (divisible by 2) - required for video codecs
+  targetWidth = targetWidth % 2 === 0 ? targetWidth : targetWidth - 1;
+  targetHeight = targetHeight % 2 === 0 ? targetHeight : targetHeight - 1;
+
+  // Step 4: Final validation - ensure we still meet minimums after rounding
+  // This can happen if we rounded down an odd number that was exactly 480
+  if (targetWidth < MIN_VIDEO_DIMENSION) targetWidth = MIN_VIDEO_DIMENSION;
+  if (targetHeight < MIN_VIDEO_DIMENSION) targetHeight = MIN_VIDEO_DIMENSION;
+
+  console.log(`Processing image: ${originalWidth}x${originalHeight} → ${targetWidth}x${targetHeight} (optimized for speed)`);
+
+  // Always resize/process the image for consistency
+  const imageBuffer = await sharp(imagePath)
+    .resize(targetWidth, targetHeight, {
+      fit: 'inside',
+      withoutEnlargement: false
+    })
+    .toBuffer();
+
+  return {
+    buffer: imageBuffer,
+    width: targetWidth,
+    height: targetHeight,
+    wasResized: (targetWidth !== originalWidth || targetHeight !== originalHeight)
+  };
+}
+
 // Load the Telegram token from the .env file
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -138,10 +208,14 @@ bot.getMe().then((info) => {
 // Keep track of each user's last prompt so we can handle "!repeat"
 const userLastPrompt = {};
 
+// Keep track of users waiting to provide video prompts for their uploaded images
+// Structure: { userId: { fileId, filePath, timestamp, chatId } }
+const userImageContext = {};
+
 // Load the channel config once at startup
 let channelConfig = loadChannelConfig();
 
-// We’ll store the sogni instance globally so we can refer to it in handlers
+// We'll store the sogni instance globally so we can refer to it in handlers
 let globalSogni = null;
 
 /**
@@ -241,6 +315,7 @@ const startTelegramBot = (sogni) => {
 - **!generate <prompt>** - Generate stickers
 - **!imagine <prompt>** - (same as !generate)
 - **!video <prompt>** - Generate a 5 second video
+- **📷 Send a photo with caption** - Create image-to-video (private chats only)
 - **!repeat** - Generate more images with your last prompt
 
 - **/addwhitelist** - Add comma-separated words to this channel's whitelist (admin-only)
@@ -260,13 +335,19 @@ const startTelegramBot = (sogni) => {
   bot.onText(/^\/start$/, (msg) => {
     const chatId = msg.chat.id;
     const messageOptions = getThreadMessageOptions(msg);
+    const isPrivateChat = msg.chat.type === 'private';
+
+    const baseMessage = 'Good day! I can create stickers and videos for you!\n\n' +
+      'Use "!generate <prompt>" or "!imagine <prompt>" to create stickers.\n' +
+      'Use "!video <prompt>" to create a 5 second video.\n';
+
+    const imageToVideoMessage = isPrivateChat
+      ? '📷 Send a photo with caption to create an image-to-video!\n\n'
+      : '\n';
 
     bot.sendMessage(
       chatId,
-      'Good day! I can create stickers and videos for you!\n\n' +
-        'Use "!generate <prompt>" or "!imagine <prompt>" to create stickers.\n' +
-        'Use "!video <prompt>" to create a 5 second video.\n\n' +
-        'Type /help to see all available commands.',
+      baseMessage + imageToVideoMessage + 'Type /help to see all available commands.',
       messageOptions
     );
   });
@@ -469,12 +550,27 @@ const startTelegramBot = (sogni) => {
    */
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    // 1) Check for photo messages (image-to-video workflow)
+    if (msg.photo && msg.photo.length > 0) {
+      await handlePhotoMessage(msg);
+      return;
+    }
+
     const userMessage = msg.text && msg.text.toLowerCase();
     if (!userMessage) return;
 
     const messageOptions = getThreadMessageOptions(msg);
 
-    // 1) Simple greetings logic
+    // 2) Check if user has pending image context and is sending a text prompt
+    if (userImageContext[userId] && !userImageContext[userId].isProcessing) {
+      // User sent text after uploading an image - use it as the video prompt
+      await handleImageToVideoRequest(msg);
+      return;
+    }
+
+    // 3) Simple greetings logic
     const isGreeting = userMessage.startsWith('hi') || userMessage.startsWith('hello');
     if (isGreeting) {
       if (msg.chat.type === 'private') {
@@ -499,7 +595,7 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
-    // 2) If user wants to repeat last prompt: "!repeat"
+    // 4) If user wants to repeat last prompt: "!repeat"
     if (userMessage.startsWith('!repeat')) {
       const userId = msg.from.id;
       const lastPrompt = userLastPrompt[userId];
@@ -513,7 +609,7 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
-    // 3) Generate command: "!generate" or "!imagine"
+    // 5) Generate command: "!generate" or "!imagine"
     if (userMessage.startsWith('!generate') || userMessage.startsWith('!imagine')) {
       // If we are in a group / supergroup, check whitelist/blacklist
       if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
@@ -540,8 +636,18 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
-    // 3.5) Video command: "!video"
+    // 4) Video command: "!video"
     if (userMessage.startsWith('!video')) {
+      // Check if user has a pending image that's being processed
+      if (userImageContext[userId] && userImageContext[userId].isProcessing) {
+        bot.sendMessage(
+          chatId,
+          '⏳ Your image-to-video is currently processing. Please wait for it to complete!',
+          messageOptions
+        );
+        return;
+      }
+
       // If we are in a group / supergroup, check whitelist/blacklist
       if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
         const { isValid, hasBlacklistedWords, missingWhitelistWords } = validateMessage(chatId, userMessage);
@@ -605,7 +711,7 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
-    // 4) If in private chat with unrecognized command:
+    // 6) If in private chat with unrecognized command:
     if (msg.chat.type === 'private') {
       bot.sendMessage(
         chatId,
@@ -614,6 +720,7 @@ const startTelegramBot = (sogni) => {
           `- /help to see more commands\n` +
           `- !generate <your prompt> or !imagine <your prompt> to create stickers\n` +
           `- !video <your prompt> to create a 5 second video\n` +
+          `- Send a photo with a caption to create an image-to-video\n` +
           `- !repeat to create more using your last prompt`,
         messageOptions
       );
@@ -639,6 +746,31 @@ const startTelegramBot = (sogni) => {
     console.log('Restarting process in 5 seconds due to polling error...');
     setTimeout(() => process.exit(1), 5000);
   });
+
+  /**
+   * Cleanup timer: Remove stale image contexts that haven't been processed
+   * This prevents memory leaks and clears abandoned image uploads
+   */
+  const CONTEXT_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+  setInterval(() => {
+    const now = Date.now();
+    let cleanedCount = 0;
+
+    for (const [userId, context] of Object.entries(userImageContext)) {
+      // Only clean up contexts that aren't currently processing
+      if (!context.isProcessing && (now - context.timestamp > CONTEXT_TIMEOUT)) {
+        console.log(`Cleaning up stale image context for user ${userId} (age: ${Math.floor((now - context.timestamp) / 1000)}s)`);
+        delete userImageContext[userId];
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.log(`Cleaned up ${cleanedCount} stale image context(s)`);
+    }
+  }, 5 * 60 * 1000); // Run every 5 minutes
+
+  console.log('Telegram bot started with image-to-video support!');
 };
 
 /**
@@ -689,6 +821,154 @@ async function handleGenerationRequest(msg, prompt) {
 }
 
 /**
+ * Handle photo message for image-to-video workflow
+ */
+async function handlePhotoMessage(msg) {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const messageOptions = getThreadMessageOptions(msg);
+
+  // Only support in private chats
+  if (msg.chat.type !== 'private') {
+    return; // Silently ignore photos in group chats
+  }
+
+  // Check if user is already processing a video
+  if (userImageContext[userId] && userImageContext[userId].isProcessing) {
+    await bot.sendMessage(
+      chatId,
+      '⏳ Your previous image is still being processed. Please wait for it to complete!',
+      messageOptions
+    );
+    return;
+  }
+
+  const photo = msg.photo[msg.photo.length - 1]; // Get largest size
+  const caption = msg.caption?.trim();
+
+  try {
+    // Download the image
+    const fileLink = await bot.getFileLink(photo.file_id);
+    const timestamp = Date.now();
+    const filePath = `renders/telegram_img2vid_${timestamp}.jpg`;
+
+    await saveFile(filePath, fileLink);
+    console.log(`Downloaded image to ${filePath} for user ${userId}`);
+
+    // If caption exists, process immediately as the video prompt
+    if (caption) {
+      console.log(`Image with caption received from user ${userId}: "${caption}"`);
+
+      // Store context and mark as processing
+      userImageContext[userId] = {
+        fileId: photo.file_id,
+        filePath,
+        timestamp,
+        chatId,
+        isProcessing: true
+      };
+
+      await handleImageToVideoRequest(msg, caption);
+      return;
+    }
+
+    // No caption - store context and wait for prompt
+    userImageContext[userId] = {
+      fileId: photo.file_id,
+      filePath,
+      timestamp,
+      chatId,
+      isProcessing: false
+    };
+
+    await bot.sendMessage(
+      chatId,
+      '📷 Got your image! What kind of video would you like?\n\n' +
+      'Example: "make me point to camera and smile"\n\n' +
+      '💡 Tip: You can also send images with captions to skip this step!',
+      messageOptions
+    );
+
+  } catch (error) {
+    console.error('Error handling photo message:', error);
+    await bot.sendMessage(
+      chatId,
+      '❌ Failed to process your image. Please try again.',
+      messageOptions
+    );
+  }
+}
+
+/**
+ * Handle image-to-video request after receiving prompt
+ */
+async function handleImageToVideoRequest(msg, promptOverride = null) {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const context = userImageContext[userId];
+  const messageOptions = getThreadMessageOptions(msg);
+
+  if (!context) {
+    console.log(`No image context found for user ${userId}`);
+    return;
+  }
+
+  const prompt = promptOverride || msg.text?.trim();
+  const username = msg.from.username || `user_${userId}`;
+
+  if (!prompt) {
+    await bot.sendMessage(
+      chatId,
+      '❌ Please send a text description for your video.',
+      messageOptions
+    );
+    return;
+  }
+
+  console.log(`Processing image-to-video for user ${userId} with prompt: "${prompt}"`);
+
+  // Check rate limit
+  if (!checkVideoRateLimit(username, 'telegram')) {
+    delete userImageContext[userId];
+    await bot.sendMessage(
+      chatId,
+      '⏸️ You\'ve reached your daily limit of 3 videos. Try again tomorrow!',
+      messageOptions
+    );
+    return;
+  }
+
+  // Increment counter
+  incrementVideoCount(username, 'telegram');
+
+  // Mark as processing
+  if (userImageContext[userId]) {
+    userImageContext[userId].isProcessing = true;
+  }
+
+  // Add to video queue with image path
+  videoQueue.push({
+    msg,
+    prompt,
+    username,
+    imagePath: context.filePath  // Pass the image path for i2v
+  });
+
+  console.log(`Added image-to-video to queue. Queue length: ${videoQueue.length}`);
+
+  // Process queue
+  if (!isProcessingVideo) {
+    processNextVideo();
+  } else {
+    await bot.sendMessage(
+      chatId,
+      `🎬 Added to queue! Position: ${videoQueue.length}`,
+      messageOptions
+    );
+  }
+}
+
+/**
  * Process the next video in the queue
  */
 async function processNextVideo() {
@@ -697,9 +977,9 @@ async function processNextVideo() {
 
   isProcessingVideo = true;
 
-  const { msg, prompt, username } = videoQueue.shift();
+  const { msg, prompt, username, imagePath } = videoQueue.shift();
 
-  await handleVideoRequest(msg, prompt);
+  await handleVideoRequest(msg, prompt, imagePath);
 
   // Process next video in queue
   isProcessingVideo = false;
@@ -711,23 +991,36 @@ async function processNextVideo() {
 /**
  * Handle video generation request
  */
-async function handleVideoRequest(msg, prompt) {
+async function handleVideoRequest(msg, prompt, imagePath = null) {
   const chatId = msg.chat.id;
   const messageOptions = getThreadMessageOptions(msg);
+  const userId = msg.from.id;
 
   try {
     // 6-minute timeout for video generation (can take up to 5 minutes)
     await Promise.race([
-      performVideoGeneration(prompt, msg, messageOptions),
+      performVideoGeneration(prompt, msg, messageOptions, imagePath),
       new Promise((_, reject) => {
         setTimeout(() => {
           reject(new Error('Request timed out after 6 minutes'));
         }, 360000);
       }),
     ]);
+
+    // Clean up image context after successful generation
+    if (imagePath && userImageContext[userId]) {
+      delete userImageContext[userId];
+      console.log(`Cleaned up image context for user ${userId}`);
+    }
   } catch (err) {
     console.error('Error or timeout while processing video request:', err);
     bot.sendMessage(chatId, 'Sorry, your video request took too long or encountered an error. Please try again.', messageOptions);
+
+    // Clean up image context even on error
+    if (imagePath && userImageContext[userId]) {
+      delete userImageContext[userId];
+      console.log(`Cleaned up image context for user ${userId} after error`);
+    }
   }
 }
 
@@ -904,17 +1197,22 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
 /**
  * Generate a video using Sogni API
  */
-async function performVideoGeneration(prompt, msg, messageOptions) {
+async function performVideoGeneration(prompt, msg, messageOptions, imagePath = null) {
   const chatId = msg.chat.id;
 
   try {
-    const model = 'wan_v2.2-14b-fp8_t2v_lightx2v'; // Text-to-video model (speed variant)
+    // Select the appropriate model based on whether we have an image
+    const model = imagePath
+      ? 'wan_v2.2-14b-fp8_i2v_lightx2v'  // Image-to-video model (speed variant)
+      : 'wan_v2.2-14b-fp8_t2v_lightx2v'; // Text-to-video model (speed variant)
+
     const fps = 16;
     const frames = 80; // 5 seconds at 16fps = 80 frames
 
-    console.log(`Creating video project with prompt: "${prompt}"`);
+    const projectType = imagePath ? 'image-to-video' : 'text-to-video';
+    console.log(`Creating ${projectType} project with model: ${model}, prompt: "${prompt}"`);
 
-    let project = await globalSogni.projects.create({
+    const projectParams = {
       type: 'video',
       tokenType: "spark",
       modelId: model,
@@ -927,10 +1225,37 @@ async function performVideoGeneration(prompt, msg, messageOptions) {
       fps: fps,
       frames: frames,
       network: 'fast',
-    });
+    };
+
+    // Add reference image for image-to-video workflow
+    if (imagePath) {
+      console.log(`Processing reference image from ${imagePath}`);
+
+      // Process the image to ensure valid dimensions (480-512, divisible by 2)
+      const processedImage = await processImageForVideo(imagePath);
+
+      projectParams.referenceImage = processedImage.buffer;
+      projectParams.width = processedImage.width;
+      projectParams.height = processedImage.height;
+
+      console.log(`Reference image processed: ${processedImage.width}x${processedImage.height} (${processedImage.buffer.length} bytes)`);
+      if (processedImage.wasResized) {
+        console.log(`Image was resized for video compatibility`);
+      }
+    } else {
+      // For text-to-video, use 512x512 for faster generation
+      projectParams.width = 512;
+      projectParams.height = 512;
+      console.log('Using 512x512 for text-to-video (optimized for speed)');
+    }
+
+    let project = await globalSogni.projects.create(projectParams);
 
     console.log(`Video project created: ${project.id}`);
-    bot.sendMessage(chatId, 'Video project created, waiting for completion...', messageOptions);
+    const statusMessage = imagePath
+      ? '🎬 Image-to-video project created, waiting for completion...'
+      : 'Video project created, waiting for completion...';
+    bot.sendMessage(chatId, statusMessage, messageOptions);
 
     const videos = await project.waitForCompletion();
     console.log(`Video project ${project.id} completed. Received ${videos.length} video(s).`);
