@@ -85,12 +85,13 @@ function incrementVideoCount(username) {
 /**
  * Process image for video generation
  * Resizes to 512px max (for faster generation) while maintaining aspect ratio
- * Ensures BOTH dimensions are divisible by 2 and within 480-512 range
+ * Ensures BOTH dimensions are divisible by 16 and within 480-512 range
  * Returns { buffer, width, height, wasResized }
  */
 async function processImageForVideo(imagePath) {
   const MIN_VIDEO_DIMENSION = 480;
   const TARGET_MAX_DIMENSION = 512; // Target 512px for fast generation
+  const DIVISIBILITY_REQUIREMENT = 16; // Video dimensions must be divisible by 16
 
   // Get image metadata to determine original dimensions
   const metadata = await sharp(imagePath).metadata();
@@ -124,16 +125,24 @@ async function processImageForVideo(imagePath) {
     targetHeight = Math.floor(targetHeight * scaleFactor);
   }
 
-  // Step 3: Ensure dimensions are even (divisible by 2) - required for video codecs
-  targetWidth = targetWidth % 2 === 0 ? targetWidth : targetWidth - 1;
-  targetHeight = targetHeight % 2 === 0 ? targetHeight : targetHeight - 1;
+  // Step 3: Ensure dimensions are divisible by 16 - required for video generation
+  targetWidth = Math.floor(targetWidth / DIVISIBILITY_REQUIREMENT) * DIVISIBILITY_REQUIREMENT;
+  targetHeight = Math.floor(targetHeight / DIVISIBILITY_REQUIREMENT) * DIVISIBILITY_REQUIREMENT;
 
   // Step 4: Final validation - ensure we still meet minimums after rounding
-  // This can happen if we rounded down an odd number that was exactly 480
+  // This can happen if we rounded down to a value below the minimum
   if (targetWidth < MIN_VIDEO_DIMENSION) targetWidth = MIN_VIDEO_DIMENSION;
   if (targetHeight < MIN_VIDEO_DIMENSION) targetHeight = MIN_VIDEO_DIMENSION;
 
-  console.log(`Processing image: ${originalWidth}x${originalHeight} → ${targetWidth}x${targetHeight} (optimized for speed)`);
+  // Step 5: Verify divisibility after adjustment
+  if (targetWidth % DIVISIBILITY_REQUIREMENT !== 0) {
+    targetWidth = Math.floor(targetWidth / DIVISIBILITY_REQUIREMENT) * DIVISIBILITY_REQUIREMENT;
+  }
+  if (targetHeight % DIVISIBILITY_REQUIREMENT !== 0) {
+    targetHeight = Math.floor(targetHeight / DIVISIBILITY_REQUIREMENT) * DIVISIBILITY_REQUIREMENT;
+  }
+
+  console.log(`Processing image: ${originalWidth}x${originalHeight} → ${targetWidth}x${targetHeight} (optimized for speed, divisible by 16)`);
 
   // Always resize/process the image for consistency
   const imageBuffer = await sharp(imagePath)
@@ -216,27 +225,59 @@ function attachEventListeners(client) {
     const prefix = '!';
     const userMessage = message.content.trim();
 
-    // Check for image attachments (for image-to-video workflow)
+    // Check for attachments
     if (message.attachments.size > 0) {
+      // Ignore video attachments completely - don't process them
+      const videoAttachment = message.attachments.find(att =>
+        att.contentType && att.contentType.startsWith('video/')
+      );
+
+      if (videoAttachment) {
+        console.log(`Video attachment detected in channel: "${message.channel.name}" - ignoring`);
+        return; // Ignore all video uploads
+      }
+
+      // Check for image attachments (for image-to-video workflow)
+      // Only process images in #sogni-sticker-bot channel
       const imageAttachment = message.attachments.find(att =>
         att.contentType && att.contentType.startsWith('image/')
       );
 
       if (imageAttachment) {
-        await handleImageAttachment(message, imageAttachment, userId);
-        return;
+        // Only handle image uploads in #sogni-sticker-bot channel
+        const channelName = message.channel.name;
+        console.log(`Image uploaded in channel: "${channelName}"`);
+
+        // Check if channel name contains "sogni-sticker-bot" (handles emoji prefixes)
+        if (channelName && channelName.includes('sogni-sticker-bot')) {
+          console.log(`Processing image in #sogni-sticker-bot channel`);
+          await handleImageAttachment(message, imageAttachment, userId);
+          return;
+        } else {
+          console.log(`Ignoring image upload - not in #sogni-sticker-bot (current: "${channelName}")`);
+        }
+        // If not in the right channel, ignore the image attachment
+        // and continue to process any command if present
       }
     }
 
-    // Check if user has pending image context and is sending a text message
-    if (userImageContext[userId] && userMessage && !userMessage.startsWith(prefix)) {
-      await handleImageToVideoPrompt(message, userId);
+    // If no command prefix and no image attachment, ignore the message
+    if (!userMessage.startsWith(prefix)) {
       return;
     }
 
-    if (!userMessage.startsWith(prefix)) {
-      // Ignore messages that don't start with the prefix
-      return;
+    // Check if user has pending image context and is sending a text message with prefix
+    if (userImageContext[userId] && userMessage.startsWith(prefix)) {
+      // Extract the message content after the prefix
+      const textAfterPrefix = userMessage.slice(prefix.length).trim();
+      // If it's not a recognized command, treat it as an image-to-video prompt
+      const recognizedCommands = ['start', 'help', 'generate', 'imagine', 'video', 'repeat'];
+      const commandWord = textAfterPrefix.split(/ +/)[0].toLowerCase();
+
+      if (!recognizedCommands.includes(commandWord)) {
+        await handleImageToVideoPrompt(message, userId, textAfterPrefix);
+        return;
+      }
     }
 
     const args = userMessage.slice(prefix.length).trim().split(/ +/);
@@ -296,6 +337,16 @@ function attachEventListeners(client) {
       processNextRequest(sogniRef);
     }
     else if (command === 'video') {
+      // Only allow video generation in #sogni-sticker-bot channel
+      const channelName = message.channel.name;
+      console.log(`!video command used in channel: "${channelName}"`);
+
+      if (!channelName || !channelName.includes('sogni-sticker-bot')) {
+        console.log(`Ignoring !video command - not in #sogni-sticker-bot (current: "${channelName}")`);
+        message.channel.send('Video generation is only available in the #sogni-sticker-bot channel.');
+        return;
+      }
+
       const prompt = args.join(' ');
       if (!prompt) {
         message.channel.send('Please provide a prompt. Usage: `!video [your prompt]`.');
@@ -759,7 +810,19 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
     ]);
   } catch (error) {
     console.error('Error or timeout performing video generation:', error);
-    channel.send('Your video request took too long (over 6 minutes) or encountered an error. Please try again.');
+
+    // Determine if it's a timeout or an actual error
+    let errorMessage = 'Your video request encountered an error. Please try again.';
+
+    if (error.message === 'Timeout exceeded: 6 minutes') {
+      errorMessage = 'Your video request took too long (over 6 minutes). Please try again.';
+    } else if (error.code || error.message) {
+      // Show the actual error to help users understand what went wrong
+      const errorDetail = error.message || JSON.stringify(error);
+      errorMessage = `❌ Video generation failed: ${errorDetail}\n\nPlease try with a different image or prompt.`;
+    }
+
+    channel.send(errorMessage);
   } finally {
     // Clean up image context if this was an image-to-video request
     if (imagePath && userImageContext[userId]) {
