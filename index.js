@@ -37,8 +37,6 @@ async function connectSogni() {
     const sogni = await SogniClient.createInstance({
       appId: process.env.APP_ID,
       network: 'fast',
-      restEndpoint: process.env.REST_ENDPOINT,
-      socketEndpoint: process.env.SOCKET_ENDPOINT,
     });
 
     console.log('Sogni API client initialized successfully.');
@@ -56,6 +54,21 @@ async function connectSogni() {
 
     // Attempt to login
     await sogni.account.login(process.env.SOGNI_USERNAME, process.env.SOGNI_PASSWORD);
+
+    // Wait for the WebSocket to be fully connected before continuing
+    // This avoids a race condition where some background heartbeat pings may fail 
+    // if issued before the socket is fully OPEN.
+    console.log('Waiting for Sogni WebSocket to connect...');
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Sogni WebSocket connection timed out (30s)'));
+      }, 30000);
+
+      sogni.apiClient.once('connected', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
 
     return sogni;
   } catch (error) {
