@@ -762,7 +762,14 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
     ]);
   } catch (error) {
     console.error('Error or timeout performing video generation:', error);
-    channel.send('Your video request took too long (over 6 minutes) or encountered an error. Please try again.');
+
+    if (error.message === 'Timeout exceeded: 6 minutes') {
+      channel.send('Your video request took too long (over 6 minutes) and was canceled. Please try again.');
+    } else if (error.message && error.message.includes('Insufficient funds')) {
+      channel.send('Sorry, the bot is out of funds for video generation. Please request a top-up!');
+    } else {
+      channel.send(`Error generating video: ${error.message || 'Unknown error'}. Please try again.`);
+    }
   } finally {
     // Clean up image context if this was an image-to-video request
     if (imagePath && userImageContext[userId]) {
