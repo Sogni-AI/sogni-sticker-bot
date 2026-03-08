@@ -5,3 +5,4 @@ renders/
 channelConfig.json
 videoRateLimit.json
 videoRateLimitDiscord.json
+discordBot.js
