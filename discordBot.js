@@ -246,22 +246,22 @@ function attachEventListeners(client) {
     if (command === 'start') {
       message.channel.send(
         'Good day! I can create stickers and videos for you!\n\n' +
-          'Use `!generate [your prompt]` or `!imagine [your prompt]` to create stickers.\n' +
-          'Use `!video [your prompt]` to create a 5 second video.\n' +
-          '📷 Attach an image with text to create an image-to-video!\n\n' +
-          'Type `!help` to see all available commands.'
+        'Use `!generate [your prompt]` or `!imagine [your prompt]` to create stickers.\n' +
+        'Use `!video [your prompt]` to create a 5 second video.\n' +
+        '📷 Attach an image with text to create an image-to-video!\n\n' +
+        'Type `!help` to see all available commands.'
       );
     }
     else if (command === 'help') {
       message.channel.send(
         'Available commands:\n' +
-          '`!start` - Start interaction with the bot.\n' +
-          '`!generate [prompt]` - Generate stickers.\n' +
-          '`!imagine [prompt]` - Same as !generate.\n' +
-          '`!video [prompt]` - Generate a 5 second video.\n' +
-          '📷 **Attach image with text** - Create image-to-video.\n' +
-          '`!repeat` - Generate more images with your last prompt.\n' +
-          '`!help` - Show this help message.'
+        '`!start` - Start interaction with the bot.\n' +
+        '`!generate [prompt]` - Generate stickers.\n' +
+        '`!imagine [prompt]` - Same as !generate.\n' +
+        '`!video [prompt]` - Generate a 5 second video.\n' +
+        '📷 **Attach image with text** - Create image-to-video.\n' +
+        '`!repeat` - Generate more images with your last prompt.\n' +
+        '`!help` - Show this help message.'
       );
     }
     // ----- Updated line below: now we check if command is 'generate' OR 'imagine' -----
@@ -566,6 +566,9 @@ async function processNextRequest(sogni) {
         numberOfMedia: batchSize,
         sampler: 'Euler',
         scheduler: 'linear',
+        sizePreset: 'custom',
+        width: 512,
+        height: 512,
       });
 
       if (attempt > 1) {
@@ -595,7 +598,7 @@ async function processNextRequest(sogni) {
       const removedCount = batchSize - images.length;
       channel.send(
         `Generated ${images.length} out of ${batchSize} image(s). ` +
-          `${removedCount} was removed by the NSFW filter.`
+        `${removedCount} was removed by the NSFW filter.`
       );
     }
 
