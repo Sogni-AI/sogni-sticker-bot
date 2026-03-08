@@ -413,9 +413,7 @@ function attachEventListeners(client) {
 
       processNextRequest(sogniRef);
     }
-    else {
-      message.channel.send('Unknown command. Use `!help` to see available commands.');
-    }
+    // Ignore unknown commands
   });
 }
 
