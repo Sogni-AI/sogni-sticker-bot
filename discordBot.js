@@ -287,22 +287,22 @@ function attachEventListeners(client) {
     if (command === 'start') {
       message.channel.send(
         'Good day! I can create stickers and videos for you!\n\n' +
-          'Use `!generate [your prompt]` or `!imagine [your prompt]` to create stickers.\n' +
-          'Use `!video [your prompt]` to create a 5 second video.\n' +
-          '📷 Attach an image with text to create an image-to-video!\n\n' +
-          'Type `!help` to see all available commands.'
+        'Use `!generate [your prompt]` or `!imagine [your prompt]` to create stickers.\n' +
+        'Use `!video [your prompt]` to create a 5 second video.\n' +
+        '📷 Attach an image with text to create an image-to-video!\n\n' +
+        'Type `!help` to see all available commands.'
       );
     }
     else if (command === 'help') {
       message.channel.send(
         'Available commands:\n' +
-          '`!start` - Start interaction with the bot.\n' +
-          '`!generate [prompt]` - Generate stickers.\n' +
-          '`!imagine [prompt]` - Same as !generate.\n' +
-          '`!video [prompt]` - Generate a 5 second video.\n' +
-          '📷 **Attach image with text** - Create image-to-video.\n' +
-          '`!repeat` - Generate more images with your last prompt.\n' +
-          '`!help` - Show this help message.'
+        '`!start` - Start interaction with the bot.\n' +
+        '`!generate [prompt]` - Generate stickers.\n' +
+        '`!imagine [prompt]` - Same as !generate.\n' +
+        '`!video [prompt]` - Generate a 5 second video.\n' +
+        '📷 **Attach image with text** - Create image-to-video.\n' +
+        '`!repeat` - Generate more images with your last prompt.\n' +
+        '`!help` - Show this help message.'
       );
     }
     // ----- Updated line below: now we check if command is 'generate' OR 'imagine' -----
@@ -615,6 +615,9 @@ async function processNextRequest(sogni) {
         numberOfMedia: batchSize,
         sampler: 'Euler',
         scheduler: 'linear',
+        sizePreset: 'custom',
+        width: 512,
+        height: 512,
       });
 
       if (attempt > 1) {
@@ -644,7 +647,7 @@ async function processNextRequest(sogni) {
       const removedCount = batchSize - images.length;
       channel.send(
         `Generated ${images.length} out of ${batchSize} image(s). ` +
-          `${removedCount} was removed by the NSFW filter.`
+        `${removedCount} was removed by the NSFW filter.`
       );
     }
 
@@ -809,18 +812,13 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
   } catch (error) {
     console.error('Error or timeout performing video generation:', error);
 
-    // Determine if it's a timeout or an actual error
-    let errorMessage = 'Your video request encountered an error. Please try again.';
-
     if (error.message === 'Timeout exceeded: 6 minutes') {
-      errorMessage = 'Your video request took too long (over 6 minutes). Please try again.';
-    } else if (error.code || error.message) {
-      // Show the actual error to help users understand what went wrong
-      const errorDetail = error.message || JSON.stringify(error);
-      errorMessage = `❌ Video generation failed: ${errorDetail}\n\nPlease try with a different image or prompt.`;
+      channel.send('Your video request took too long (over 6 minutes) and was canceled. Please try again.');
+    } else if (error.message && error.message.includes('Insufficient funds')) {
+      channel.send('Sorry, the bot is out of funds for video generation. Please request a top-up!');
+    } else {
+      channel.send(`Error generating video: ${error.message || 'Unknown error'}. Please try again.`);
     }
-
-    channel.send(errorMessage);
   } finally {
     // Clean up image context if this was an image-to-video request
     if (imagePath && userImageContext[userId]) {
