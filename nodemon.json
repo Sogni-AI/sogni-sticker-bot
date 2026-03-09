@@ -1,0 +1,9 @@
+{
+    "watch": [
+        "index.js",
+        "discordBot.js",
+        "telegramBot.js",
+        "lib/"
+    ],
+    "ext": "js"
+}

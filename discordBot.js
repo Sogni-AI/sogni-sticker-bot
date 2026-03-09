@@ -13,6 +13,10 @@ const token = process.env.DISCORD_BOT_TOKEN;
 const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimitDiscord.json');
 const MAX_VIDEOS_PER_DAY = 10;
 
+// User contexts
+const userImageContext = {};
+const userMusicContext = {}; // { prompt, duration, channelId, isWaitingForLyrics }
+
 // Helper to load video rate limit data
 function loadVideoRateLimits() {
   try {
@@ -47,12 +51,7 @@ function checkVideoRateLimit(username) {
   const rateLimits = loadVideoRateLimits();
   const today = getCurrentUTCDay();
 
-  if (!rateLimits[username]) {
-    rateLimits[username] = { day: today, count: 0 };
-  }
-
-  // Reset count if it's a new day
-  if (rateLimits[username].day !== today) {
+  if (!rateLimits[username] || rateLimits[username].day !== today) {
     rateLimits[username] = { day: today, count: 0 };
   }
 
@@ -229,8 +228,9 @@ function attachEventListeners(client) {
     }
 
     // Check if user has pending image context and is sending a text message
-    if (userImageContext[userId] && userMessage && !userMessage.startsWith(prefix)) {
-      await handleImageToVideoPrompt(message, userId);
+    // Check if user has pending music context and is sending a text message
+    if (userMusicContext[userId] && userMusicContext[userId].isWaitingForLyrics && userMessage && !userMessage.startsWith(prefix)) {
+      await handleMusicLyrics(message, userId);
       return;
     }
 
@@ -245,9 +245,10 @@ function attachEventListeners(client) {
     // ---- Handle commands ----
     if (command === 'start') {
       message.channel.send(
-        'Good day! I can create stickers and videos for you!\n\n' +
+        'Good day! I can create stickers, videos, and music for you!\n\n' +
         'Use `!generate [your prompt]` or `!imagine [your prompt]` to create stickers.\n' +
         'Use `!video [your prompt]` to create a 5 second video.\n' +
+        'Use `!music prompt: <text> lyrics:on/off duration:x` to create music.\n' +
         '📷 Attach an image with text to create an image-to-video!\n\n' +
         'Type `!help` to see all available commands.'
       );
@@ -259,6 +260,7 @@ function attachEventListeners(client) {
         '`!generate [prompt]` - Generate stickers.\n' +
         '`!imagine [prompt]` - Same as !generate.\n' +
         '`!video [prompt]` - Generate a 5 second video.\n' +
+        '`!music prompt: <text> lyrics:on/off duration:x` - Generate music.\n' +
         '📷 **Attach image with text** - Create image-to-video.\n' +
         '`!repeat` - Generate more images with your last prompt.\n' +
         '`!help` - Show this help message.'
@@ -337,6 +339,93 @@ function attachEventListeners(client) {
 
       processNextRequest(sogniRef);
     }
+    else if (command === 'music') {
+      const rawInput = message.content.slice(7).trim(); // Remove '!music '
+      let prompt = null;
+      let duration = null;
+      let lyricsOn = false;
+
+      // New Structured Parsing: prompt: <text> lyrics: on/off duration: <seconds>
+      // This allows users to provide parameters in any order using key:value syntax.
+      if (/prompt:|lyrics:|duration:/i.test(rawInput)) {
+        const promptMatch = rawInput.match(/prompt:\s*(.+?)(?=\s*(?:lyrics:|duration:|$))/i);
+        const lyricsMatch = rawInput.match(/lyrics:\s*(on|off)/i);
+        const durationMatch = rawInput.match(/duration:\s*(\d+)/i);
+
+        if (promptMatch) prompt = promptMatch[1].trim();
+        if (lyricsMatch) lyricsOn = lyricsMatch[1].toLowerCase() === 'on';
+        if (durationMatch) duration = parseInt(durationMatch[1], 10);
+      } else {
+        // Fallback to old positional format: !music <prompt> [optional: seconds]
+        let fallbackArgs = args.slice();
+        const lyricsIndex = fallbackArgs.findIndex(arg => /^lyrics:(on|off)$/i.test(arg));
+        if (lyricsIndex !== -1) {
+          lyricsOn = fallbackArgs[lyricsIndex].toLowerCase() === 'lyrics:on';
+          fallbackArgs.splice(lyricsIndex, 1);
+        }
+        if (fallbackArgs.length > 0) {
+          const lastArg = fallbackArgs[fallbackArgs.length - 1];
+          const dMatch = lastArg.match(/^(\d+)s?$/i);
+          if (dMatch) {
+            duration = parseInt(dMatch[1], 10);
+            fallbackArgs.pop();
+          }
+        }
+        prompt = fallbackArgs.join(' ').trim();
+      }
+
+      if (!prompt) {
+        message.channel.send('Please provide a prompt. Usage: `!music [your prompt] [optional: seconds]`.');
+        return;
+      }
+
+      // If duration was provided, clamp it between 10 and 600 for safety (SDK minimum is 10)
+      if (duration !== null) {
+        if (duration < 10) duration = 10;
+        if (duration > 600) duration = 600;
+      }
+
+      if (pendingUsers.has(userId)) {
+        message.channel.send('You already have a pending request. Please wait until it\'s processed.');
+        return;
+      }
+
+
+      // If lyrics are ON, we need to wait for user to send them
+      if (lyricsOn) {
+        userMusicContext[userId] = {
+          prompt,
+          duration,
+          channelId: message.channel.id,
+          isWaitingForLyrics: true
+        };
+        const dStr = duration ? `${duration}s` : 'Auto';
+        message.channel.send(`🎵 **Lyrics requested!** Please reply to this message with the lyrics for your song.\n\n**Prompt:** ${prompt}\n**Duration:** ${dStr}`);
+        return;
+      }
+
+      const username = message.author.username || `user_${message.author.id}`;
+
+      // Queue audio request
+      requestQueue.push({ userId, channel: message.channel, prompt, isAudio: true, duration, username });
+      pendingUsers.add(userId);
+
+      if (isProcessing) {
+        const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
+        const totalInQueue = requestQueue.length;
+        const dStr = duration ? `${duration}s` : 'Auto';
+        message.channel.send(
+          `Your music request has been queued! You are position ${positionInQueue} of ${totalInQueue} in the queue.\n` +
+          `**Prompt:** ${prompt}\n**Duration:** ${dStr}\n\n` +
+          `Your music will be generated once the previous ones complete.`
+        );
+      } else {
+        const durationText = duration ? `${duration} second ` : '(Auto Duration) ';
+        message.channel.send(`Generating ${durationText}music for: ${prompt}\n(This can take a minute or two)`);
+      }
+
+      processNextRequest(sogniRef);
+    }
     else if (command === 'repeat') {
       // Use the last prompt
       const lastPrompt = lastPromptByUser[userId];
@@ -377,7 +466,6 @@ let sogniRef = null; // store sogni globally in this module
 
 // Image-to-video context tracking
 // Structure: { userId: { filePath, timestamp, channelId } }
-const userImageContext = {};
 
 /**
  * Handle image attachment for image-to-video workflow
@@ -505,6 +593,61 @@ async function handleImageToVideoPrompt(message, userId, promptOverride = null) 
   processNextRequest(sogniRef);
 }
 
+/**
+ * Handle music lyrics after receiving lyrics:on command
+ */
+async function handleMusicLyrics(message, userId) {
+  const context = userMusicContext[userId];
+
+  if (!context) {
+    console.log(`No music context found for user ${userId}`);
+    return;
+  }
+
+  const lyrics = message.content.trim();
+  const username = message.author.username || `user_${userId}`;
+
+  if (!lyrics) {
+    message.channel.send('❌ Please send the lyrics for your song.');
+    return;
+  }
+
+  console.log(`Processing music for user ${userId} with lyrics and prompt: "${context.prompt}"`);
+
+
+  // Queue music request
+  requestQueue.push({
+    userId,
+    channel: message.channel,
+    prompt: context.prompt,
+    duration: context.duration,
+    isAudio: true,
+    username,
+    lyrics: lyrics
+  });
+  pendingUsers.add(userId);
+
+  // Clear context
+  delete userMusicContext[userId];
+
+  if (isProcessing) {
+    const positionInQueue = requestQueue.findIndex((req) => req.userId === userId) + 1;
+    const totalInQueue = requestQueue.length;
+    const dStr = context.duration ? `${context.duration}s` : 'Auto';
+    message.channel.send(
+      `🎵 Added to queue! Your song with lyrics is position ${positionInQueue}/${totalInQueue}.\n` +
+      `**Prompt:** ${context.prompt}\n**Duration:** ${dStr}`
+    );
+  } else {
+    const dStr = context.duration ? `${context.duration}s` : 'Auto';
+    message.channel.send(
+      `🎵 Creating your song (Duration: ${dStr}) with lyrics...`
+    );
+  }
+
+  processNextRequest(sogniRef);
+}
+
 //Start the Discord Bot
 function startDiscordBot(sogni) {
   sogniRef = sogni; // store reference for processNextRequest
@@ -532,11 +675,17 @@ async function processNextRequest(sogni) {
 
   isProcessing = true;
 
-  const { userId, channel, prompt, isVideo, imagePath } = requestQueue.shift();
+  const { userId, channel, prompt, isVideo, isAudio, imagePath, duration, lyrics } = requestQueue.shift();
 
   // If this is a video request, handle it separately
   if (isVideo) {
     await handleVideoRequest(sogni, channel, prompt, userId, imagePath);
+    return;
+  }
+
+  // If this is an audio request, handle it separately
+  if (isAudio) {
+    await handleAudioRequest(sogni, channel, prompt, userId, duration, lyrics);
     return;
   }
 
@@ -777,6 +926,108 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
       console.log(`Cleaned up image context for user ${userId}`);
     }
 
+    pendingUsers.delete(userId);
+    isProcessing = false;
+    processNextRequest(sogni);
+  }
+}
+
+/**
+ * Handle audio generation request for Discord
+ */
+async function handleAudioRequest(sogni, channel, prompt, userId, duration, lyrics = null) {
+  const performAudioGeneration = async () => {
+    const model = 'ace_step_1.5_turbo';
+
+    console.log(`Creating audio project with model: ${model}, prompt: "${prompt}", duration: ${duration || 'Auto'}, lyrics: ${lyrics ? 'Yes' : 'No'}`);
+
+    const projectParams = {
+      type: 'audio',
+      tokenType: "spark",
+      modelId: model,
+      positivePrompt: prompt,
+      numberOfMedia: 1,
+      network: 'fast'
+    };
+
+    if (duration !== null) {
+      projectParams.duration = duration;
+    }
+
+    if (lyrics) {
+      projectParams.lyrics = lyrics;
+    }
+
+    let project = await sogni.projects.create(projectParams);
+
+    console.log(`Audio project created: ${project.id}`);
+    channel.send('🎵 Music project created, making some beats...');
+
+    const audios = await project.waitForCompletion();
+    console.log(`Audio project ${project.id} completed. Received ${audios.length} audio(s).`);
+
+    if (audios.length === 0) {
+      channel.send('No music was generated. Please try a different prompt!');
+      return;
+    }
+
+    // Download and send the audio
+    const audioUrl = audios[0];
+
+    // Extract extension from URL path dynamically (e.g., .m4a, .mp3).
+    // This ensures Discord can correctly parse the audio duration and metadata,
+    // while stripping out S3 query parameters that are invalid in Windows file paths.
+    let ext = 'mp3';
+    try {
+      const urlPath = new URL(audioUrl).pathname;
+      const detectedExt = path.extname(urlPath).replace('.', '');
+      if (detectedExt) ext = detectedExt;
+    } catch (e) {
+      console.error('Error detecting extension from URL:', e);
+    }
+
+    const audioFilePath = path.join(__dirname, 'renders', `discord_music_${Date.now()}.${ext}`);
+
+    await saveFile(audioFilePath, audioUrl);
+    const stats = fs.statSync(audioFilePath);
+    console.log(`Saved audio to ${audioFilePath} (${stats.size} bytes)`);
+
+    // Basic file size check to catch 0s/empty media generation failures
+    if (stats.size < 1000) {
+      throw new Error(`Generated audio file is too small (${stats.size} bytes). This usually means generation failed.`);
+    }
+
+    // Send the music as an attachment with its native extension
+    if (fs.existsSync(audioFilePath)) {
+      const attachment = new AttachmentBuilder(audioFilePath, { name: `sogni_music.${ext}` });
+      await channel.send({ files: [attachment] });
+      channel.send('Here is your new beat! 🎧');
+    } else {
+      throw new Error(`Audio file not found: ${audioFilePath}`);
+    }
+  };
+
+  try {
+    // Race audio generation against a 4-minute timeout
+    await Promise.race([
+      performAudioGeneration(),
+      new Promise((_, reject) =>
+        setTimeout(() => {
+          reject(new Error('Timeout exceeded: 4 minutes'));
+        }, 240000)
+      ),
+    ]);
+  } catch (error) {
+    console.error('Error or timeout performing audio generation:', error);
+
+    if (error.message === 'Timeout exceeded: 4 minutes') {
+      channel.send('Your music request took too long (over 4 minutes) and was canceled. Please try again.');
+    } else if (error.message && error.message.includes('Insufficient funds')) {
+      channel.send('Sorry, the bot is out of funds for music generation. Please request a top-up!');
+    } else {
+      channel.send(`Error generating music: ${error.message || 'Unknown error'}. Please try again.`);
+    }
+  } finally {
     pendingUsers.delete(userId);
     isProcessing = false;
     processNextRequest(sogni);

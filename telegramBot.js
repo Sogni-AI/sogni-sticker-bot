@@ -11,8 +11,12 @@ const convertImageToSticker = require('./lib/convertImageToSticker');
 const CHANNEL_CONFIG_PATH = path.join(__dirname, 'channelConfig.json');
 
 // Path to video rate limit tracking file
-const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimit.json');
+const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimitTelegram.json');
 const MAX_VIDEOS_PER_DAY = 10;
+
+// User Contexts
+const userImageContext = {};
+const userMusicContext = {}; // { prompt, duration, isWaitingForLyrics }
 
 // Helper to load config
 function loadChannelConfig() {
@@ -210,7 +214,6 @@ const userLastPrompt = {};
 
 // Keep track of users waiting to provide video prompts for their uploaded images
 // Structure: { userId: { fileId, filePath, timestamp, chatId } }
-const userImageContext = {};
 
 // Load the channel config once at startup
 let channelConfig = loadChannelConfig();
@@ -297,6 +300,10 @@ function getThreadMessageOptions(msg) {
 let videoQueue = [];
 let isProcessingVideo = false;
 
+// Audio request queue for Telegram
+let audioQueue = [];
+let isProcessingAudio = false;
+
 /**
  * Start the Telegram bot
  */
@@ -315,6 +322,7 @@ const startTelegramBot = (sogni) => {
 - **!generate <prompt>** - Generate stickers
 - **!imagine <prompt>** - (same as !generate)
 - **!video <prompt>** - Generate a 5 second video
+- **!music <prompt> [optional: seconds]** - Generate music
 - **📷 Send a photo with caption** - Create image-to-video (private chats only)
 - **!repeat** - Generate more images with your last prompt
 
@@ -337,9 +345,10 @@ const startTelegramBot = (sogni) => {
     const messageOptions = getThreadMessageOptions(msg);
     const isPrivateChat = msg.chat.type === 'private';
 
-    const baseMessage = 'Good day! I can create stickers and videos for you!\n\n' +
+    const baseMessage = 'Good day! I can create stickers, videos, and music for you!\n\n' +
       'Use "!generate <prompt>" or "!imagine <prompt>" to create stickers.\n' +
-      'Use "!video <prompt>" to create a 5 second video.\n';
+      'Use "!video <prompt>" to create a 5 second video.\n' +
+      'Use "!music <prompt> [seconds]" to create music.\n';
 
     const imageToVideoMessage = isPrivateChat
       ? '📷 Send a photo with caption to create an image-to-video!\n\n'
@@ -711,17 +720,131 @@ const startTelegramBot = (sogni) => {
       return;
     }
 
+    // 5) Music command: "!music"
+    if (userMessage.startsWith('!music')) {
+      // If we are in a group / supergroup, check whitelist/blacklist
+      if (msg.chat.type === 'supergroup' || msg.chat.type === 'group') {
+        const { isValid, hasBlacklistedWords, missingWhitelistWords } = validateMessage(chatId, userMessage);
+        if (!isValid) {
+          if (hasBlacklistedWords) {
+            bot.sendMessage(chatId, `You can't use blacklisted words in your prompt. Please try again.`, messageOptions);
+          } else if (missingWhitelistWords.length > 0) {
+            bot.sendMessage(
+              chatId,
+              `You must include at least one of the following whitelisted words: ${missingWhitelistWords.join(', ')}.`,
+              messageOptions
+            );
+          }
+          return;
+        }
+      }
+
+      // Strip out the leading "!music" and get the prompt & duration
+      const rawInput = msg.text.trim().slice(7).trim(); // Remove '!music '
+      let userPrompt = null;
+      let duration = null;
+      let lyricsOn = false;
+
+      // New Structured Parsing: prompt: <text> lyrics: on/off duration: <seconds>
+      // This allows users to provide parameters in any order using key:value syntax.
+      if (/prompt:|lyrics:|duration:/i.test(rawInput)) {
+        const promptMatch = rawInput.match(/prompt:\s*(.+?)(?=\s*(?:lyrics:|duration:|$))/i);
+        const lyricsMatch = rawInput.match(/lyrics:\s*(on|off)/i);
+        const durationMatch = rawInput.match(/duration:\s*(\d+)/i);
+
+        if (promptMatch) userPrompt = promptMatch[1].trim();
+        if (lyricsMatch) lyricsOn = lyricsMatch[1].toLowerCase() === 'on';
+        if (durationMatch) duration = parseInt(durationMatch[1], 10);
+      } else {
+        // Fallback to old positional format: !music <prompt> [optional: seconds]
+        let fallbackArgs = msg.text.trim().split(/ +/);
+        fallbackArgs.shift(); // remove '!music'
+
+        const lyricsIndex = fallbackArgs.findIndex(arg => /^lyrics:(on|off)$/i.test(arg));
+        if (lyricsIndex !== -1) {
+          lyricsOn = fallbackArgs[lyricsIndex].toLowerCase() === 'lyrics:on';
+          fallbackArgs.splice(lyricsIndex, 1);
+        }
+        if (fallbackArgs.length > 0) {
+          const lastArg = fallbackArgs[fallbackArgs.length - 1];
+          const dMatch = lastArg.match(/^(\d+)s?$/i);
+          if (dMatch) {
+            duration = parseInt(dMatch[1], 10);
+            fallbackArgs.pop();
+          }
+        }
+        userPrompt = fallbackArgs.join(' ').trim();
+      }
+
+      if (!userPrompt) {
+        bot.sendMessage(chatId, 'Please provide a prompt. Usage: `!music prompt: <text> lyrics:on/off duration:x`.', messageOptions);
+        return;
+      }
+
+      // If duration was provided, clamp it between 10 and 600 for safety (SDK minimum is 10)
+      if (duration !== null) {
+        if (duration < 10) duration = 10;
+        if (duration > 600) duration = 600;
+      }
+
+
+      // If lyrics are ON, we need to wait for user to send them
+      if (lyricsOn) {
+        userMusicContext[userId] = {
+          prompt: userPrompt,
+          duration,
+          isWaitingForLyrics: true
+        };
+        const dStr = duration ? `${duration}s` : 'Auto';
+        bot.sendMessage(
+          chatId,
+          `🎵 **Lyrics requested!** Please reply to this message with the lyrics you want to include in your song.\n\nPrompt: ${userPrompt}\nDuration: ${dStr}`,
+          { ...messageOptions, reply_markup: { force_reply: true } }
+        );
+        return;
+      }
+
+      const username = msg.from.username || `user_${msg.from.id}`;
+
+      // Add to audio queue
+      audioQueue.push({ msg, prompt: userPrompt, duration, username });
+
+      if (isProcessingAudio) {
+        const position = audioQueue.length;
+        const total = audioQueue.length;
+        const dStr = duration ? `${duration}s` : 'Auto';
+        bot.sendMessage(
+          chatId,
+          `Your music request has been queued! You are position ${position} of ${total} in the queue.\n` +
+          `Prompt: ${userPrompt}\nDuration: ${dStr}\n\n` +
+          `Your music will be generated once the previous one completes.`,
+          messageOptions
+        );
+      } else {
+        const durationText = duration ? `${duration} second ` : '(Auto Duration) ';
+        bot.sendMessage(
+          chatId,
+          `Generating ${durationText}music for: ${userPrompt}\n(This can take a minute or two)`,
+          messageOptions
+        );
+        processNextAudio();
+      }
+
+      return;
+    }
+
     // 6) If in private chat with unrecognized command:
     if (msg.chat.type === 'private') {
       bot.sendMessage(
         chatId,
         `Hello! I am your AI sticker and video bot. Here are some things you can do:\n` +
-          `- /start to see a welcome message\n` +
-          `- /help to see more commands\n` +
-          `- !generate <your prompt> or !imagine <your prompt> to create stickers\n` +
-          `- !video <your prompt> to create a 5 second video\n` +
-          `- Send a photo with a caption to create an image-to-video\n` +
-          `- !repeat to create more using your last prompt`,
+        `- /start to see a welcome message\n` +
+        `- /help to see more commands\n` +
+        `- !generate <your prompt> or !imagine <your prompt> to create stickers\n` +
+        `- !video <your prompt> to create a 5 second video\n` +
+        `- !music prompt: <text> lyrics:on/off duration:x to create music\n` +
+        `- Send a photo with a caption to create an image-to-video\n` +
+        `- !repeat to create more using your last prompt`,
         messageOptions
       );
     }
@@ -820,9 +943,29 @@ async function handleGenerationRequest(msg, prompt) {
   }
 }
 
-/**
- * Handle photo message for image-to-video workflow
- */
+// Check for lyrics reply
+if (userMusicContext[userId] && userMusicContext[userId].isWaitingForLyrics && msg.reply_to_message && msg.reply_to_message.text.includes('Lyrics requested')) {
+  const context = userMusicContext[userId];
+  const lyrics = userMessage;
+  const username = msg.from.username || `user_${userId}`;
+  const messageOptions = getThreadMessageOptions(msg);
+
+
+  // Add to audio queue
+  audioQueue.push({ msg, prompt: context.prompt, duration: context.duration, lyrics, username });
+
+  delete userMusicContext[userId];
+
+  if (isProcessingAudio) {
+    bot.sendMessage(chatId, `🎵 Added to queue with lyrics! Position: ${audioQueue.length}`, messageOptions);
+  } else {
+    bot.sendMessage(chatId, `Generating ${context.duration}s song with lyrics...\nPrompt: ${context.prompt}`, messageOptions);
+    processNextAudio();
+  }
+  return;
+}
+
+// 7) Handle photo message for image-to-video workflow
 async function handlePhotoMessage(msg) {
   const userId = msg.from.id;
   const chatId = msg.chat.id;
@@ -1079,7 +1222,7 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
       bot.sendMessage(
         msg.chat.id,
         `We generated ${images.length} out of ${batchSize} image(s). ` +
-          `${removedCount} was removed by the NSFW filter.`,
+        `${removedCount} was removed by the NSFW filter.`,
         messageOptions
       );
     }
@@ -1302,6 +1445,148 @@ async function performVideoGeneration(prompt, msg, messageOptions, imagePath = n
 
     console.error('Error performing video generation:', error);
     bot.sendMessage(chatId, 'An error occurred during video generation. Please try again later.', messageOptions);
+  }
+}
+
+/**
+ * Process the next audio in the queue
+ */
+async function processNextAudio() {
+  if (isProcessingAudio) return;
+  if (audioQueue.length === 0) return;
+
+  isProcessingAudio = true;
+
+  const { msg, prompt, duration, username, lyrics } = audioQueue.shift();
+
+  await handleAudioRequest(msg, prompt, duration, lyrics);
+
+  // Process next audio in queue
+  isProcessingAudio = false;
+  if (audioQueue.length > 0) {
+    processNextAudio();
+  }
+}
+
+/**
+ * Handle audio generation request
+ */
+async function handleAudioRequest(msg, prompt, duration, lyrics = null) {
+  const chatId = msg.chat.id;
+  const messageOptions = getThreadMessageOptions(msg);
+
+  try {
+    // 4-minute timeout for audio generation
+    await Promise.race([
+      performAudioGeneration(prompt, duration, msg, messageOptions, lyrics),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Request timed out after 4 minutes'));
+        }, 240000);
+      }),
+    ]);
+  } catch (err) {
+    console.error('Error or timeout while processing audio request:', err);
+    bot.sendMessage(chatId, 'Sorry, your music request took too long or encountered an error. Please try again.', messageOptions);
+  }
+}
+
+/**
+ * Generate audio using Sogni API
+ */
+async function performAudioGeneration(prompt, duration, msg, messageOptions, lyrics = null) {
+  const chatId = msg.chat.id;
+
+  try {
+    const model = 'ace_step_1.5_turbo';
+
+    console.log(`Creating audio project with model: ${model}, prompt: "${prompt}", duration: ${duration || 'Auto'}, lyrics: ${lyrics ? 'Yes' : 'No'}`);
+
+    const projectParams = {
+      type: 'audio',
+      tokenType: "spark",
+      modelId: model,
+      positivePrompt: prompt,
+      numberOfMedia: 1,
+      network: 'fast'
+    };
+
+    if (duration !== null) {
+      projectParams.duration = duration;
+    }
+
+    if (lyrics) {
+      projectParams.lyrics = lyrics;
+    }
+
+    let project = await globalSogni.projects.create(projectParams);
+
+    console.log(`Audio project created: ${project.id}`);
+    bot.sendMessage(chatId, '🎵 Music project created, making some beats...', messageOptions);
+
+    const audios = await project.waitForCompletion();
+    console.log(`Audio project ${project.id} completed. Received ${audios.length} audio(s).`);
+
+    if (audios.length === 0) {
+      bot.sendMessage(chatId, 'No music was generated. Please try a different prompt!', messageOptions);
+      return;
+    }
+
+    // Download and send the audio
+    const audioUrl = audios[0];
+
+    // Extract extension from URL path dynamically (e.g., .m4a, .mp3).
+    // This ensuring Telegram correctly parses metadata while avoiding Windows-unsafe paths.
+    let ext = 'mp3';
+    try {
+      const urlPath = new URL(audioUrl).pathname;
+      const detectedExt = path.extname(urlPath).replace('.', '');
+      if (detectedExt) ext = detectedExt;
+    } catch (e) {
+      console.error('Error detecting extension from URL:', e);
+    }
+
+    const audioFilePath = `renders/telegram_music_${Date.now()}.${ext}`;
+
+    await saveFile(audioFilePath, audioUrl);
+    const stats = fs.statSync(audioFilePath);
+    console.log(`Saved audio to ${audioFilePath} (${stats.size} bytes)`);
+
+    // Basic file size check to catch 0s/empty media generation failures
+    if (stats.size < 1000) {
+      throw new Error(`Generated audio file is too small (${stats.size} bytes). Generation might have failed.`);
+    }
+
+    // Send the music
+    if (fs.existsSync(audioFilePath)) {
+      await bot.sendAudio(chatId, fs.createReadStream(audioFilePath), messageOptions);
+      bot.sendMessage(chatId, 'Here is your new beat! 🎧', messageOptions);
+    } else {
+      throw new Error(`Audio file not found: ${audioFilePath}`);
+    }
+
+  } catch (error) {
+    // Handle specific errors
+    if (error && error.status === 401 && error.payload && error.payload.errorCode === 107) {
+      console.error('Detected invalid token, restarting process in 5 seconds...');
+      setTimeout(() => process.exit(1), 5000);
+      return;
+    }
+
+    if (error.message && error.message.includes('WebSocket not connected')) {
+      console.error('Detected "WebSocket not connected" error, restarting in 5 seconds...');
+      setTimeout(() => process.exit(1), 5000);
+      return;
+    }
+
+    if (error.message && error.message.includes('Insufficient funds')) {
+      console.error(error.message);
+      bot.sendMessage(chatId, 'Sorry, the bot is out of funds. Please request to top up!', messageOptions);
+      return;
+    }
+
+    console.error('Error performing audio generation:', error);
+    bot.sendMessage(chatId, 'An error occurred during music generation. Please try again later.', messageOptions);
   }
 }
 
