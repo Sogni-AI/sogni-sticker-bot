@@ -91,3 +91,4 @@ connectSogni()
     console.error('Could not start up fully due to Sogni initialization error:', err);
     // We rely on the setTimeout+exit inside connectSogni or here
   });
+
