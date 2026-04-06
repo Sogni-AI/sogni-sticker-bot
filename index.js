@@ -1,7 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const express = require('express');
-const { SogniClient } = require('@sogni-ai/sogni-client');
+const { SogniClientWrapper, ClientEvent } = require('@sogni-ai/sogni-client-wrapper');
 
 // Express app setup
 const app = express();
@@ -27,35 +27,42 @@ if (!telegramToken && !discordToken) {
 }
 
 /**
- * Connect to the Sogni API.
- * On error, we log and exit so that an external process (e.g. PM2) can restart us.
+ * Connect to the Sogni API through the wrapper.
+ * On startup failure, we log and exit so that an external process can restart us.
  */
 async function connectSogni() {
   try {
-    console.log('Attempting to create SogniClient instance...');
+    console.log('Attempting to create Sogni client wrapper instance...');
 
-    const sogni = await SogniClient.createInstance({
+    const sogni = new SogniClientWrapper({
+      username: process.env.SOGNI_USERNAME,
+      password: process.env.SOGNI_PASSWORD,
       appId: process.env.APP_ID,
       network: 'fast',
       restEndpoint: process.env.REST_ENDPOINT,
       socketEndpoint: process.env.SOCKET_ENDPOINT,
+      autoConnect: false,
     });
 
-    console.log('Sogni API client initialized successfully.');
-
-    // Attach event listeners
-    sogni.apiClient.on('connected', () => {
+    sogni.on(ClientEvent.CONNECTED, () => {
       console.log('Connected to Sogni API');
     });
 
-    sogni.apiClient.on('disconnected', ({ code, reason }) => {
-      console.error('Disconnected from Sogni API', code, reason);
-      console.log('Restarting process in 5 seconds...');
-      setTimeout(() => process.exit(1), 5000);
+    sogni.on(ClientEvent.RECONNECTING, (attempt) => {
+      console.warn(`Reconnecting to Sogni API (attempt ${attempt})...`);
     });
 
-    // Attempt to login
-    await sogni.account.login(process.env.SOGNI_USERNAME, process.env.SOGNI_PASSWORD);
+    sogni.on(ClientEvent.DISCONNECTED, () => {
+      console.warn('Disconnected from Sogni API');
+    });
+
+    sogni.on(ClientEvent.ERROR, (error) => {
+      console.error('Sogni client error:', error);
+    });
+
+    await sogni.connect();
+
+    console.log('Sogni API client initialized successfully.');
 
     return sogni;
   } catch (error) {
@@ -69,7 +76,6 @@ async function connectSogni() {
 // Main Startup
 connectSogni()
   .then((sogni) => {
-    // Once Sogni is connected, we can start our bots.
     if (telegramToken) {
       console.log('Starting Telegram bot...');
       const startTelegramBot = require('./telegramBot');
@@ -89,5 +95,4 @@ connectSogni()
   })
   .catch((err) => {
     console.error('Could not start up fully due to Sogni initialization error:', err);
-    // We rely on the setTimeout+exit inside connectSogni or here
   });

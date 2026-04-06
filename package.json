@@ -1,10 +1,47 @@
 {
+  "name": "@sogni-ai/sogni-sticker-bot",
+  "version": "1.0.0",
+  "description": "Telegram and Discord bot for generating Sogni AI stickers",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
+  "files": [
+    "assets",
+    "lib",
+    "discordBot.js",
+    "ecosystem.config.js",
+    "index.js",
+    "telegramBot.js",
+    "README.md"
+  ],
+  "keywords": [
+    "sogni",
+    "ai",
+    "telegram",
+    "discord",
+    "sticker",
+    "bot"
+  ],
+  "author": "Sogni AI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sogni-AI/sogni-sticker-bot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Sogni-AI/sogni-sticker-bot/issues"
+  },
+  "homepage": "https://github.com/Sogni-AI/sogni-sticker-bot#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "@sogni-ai/sogni-client": "4.0.0-alpha.29",
+    "@sogni-ai/sogni-client-wrapper": "^1.6.1",
     "axios": "^1.7.7",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",

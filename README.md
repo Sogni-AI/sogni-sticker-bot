@@ -56,6 +56,8 @@ cd sogni-sticker-bot
 npm install
 ```
 
+This repo is also published on npm as `@sogni-ai/sogni-sticker-bot`.
+
 ### 3. Set Up Environment Variables
 
 Create a `.env` file (or use environment variables in your hosting platform) with the following:
@@ -68,12 +70,14 @@ SOGNI_USERNAME=mySogniUsername
 SOGNI_PASSWORD=mySogniPassword
 
 APP_ID=stickerbot
+SOGNI_BOT_DATA_DIR=./data
 ```
 
 - **TELEGRAM_BOT_TOKEN**: Provided by [@BotFather](https://t.me/BotFather) after creating a Telegram bot.  
 - **DISCORD_BOT_TOKEN**: Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), then copy the bot token.  
 - **SOGNI_USERNAME** & **SOGNI_PASSWORD**: Your free Sogni account credentials.  
 - **APP_ID**: Any string that uniquely identifies your bot. Defaults to “stickerbot,” but you can set any name you like.  
+- **SOGNI_BOT_DATA_DIR**: Optional writable directory for bot state like Telegram whitelist/blacklist config. Defaults to the current working directory.  
 
 ### 4. Create a Telegram Bot (If You Want Telegram)
 

@@ -7,18 +7,21 @@ const saveFile = require('./lib/saveFile');
 const removeImageBg = require('./lib/removeImageBgOriginal');
 const convertImageToSticker = require('./lib/convertImageToSticker');
 
-// Path to your channel config file
-const CHANNEL_CONFIG_PATH = path.join(__dirname, 'channelConfig.json');
+const DATA_DIR = process.env.SOGNI_BOT_DATA_DIR || process.cwd();
+const CHANNEL_CONFIG_PATH = path.join(DATA_DIR, 'channelConfig.json');
+const VIDEO_RATE_LIMIT_PATH = path.join(DATA_DIR, 'videoRateLimit.json');
 
-// Path to video rate limit tracking file
-const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimit.json');
+function ensureChannelConfigDir() {
+  fs.mkdirSync(path.dirname(CHANNEL_CONFIG_PATH), { recursive: true });
+}
+
 const MAX_VIDEOS_PER_DAY = 10;
 
 // Helper to load config
 function loadChannelConfig() {
   try {
+    ensureChannelConfigDir();
     if (!fs.existsSync(CHANNEL_CONFIG_PATH)) {
-      // If file does not exist, create an empty JSON
       fs.writeFileSync(CHANNEL_CONFIG_PATH, JSON.stringify({}, null, 2));
     }
     const data = fs.readFileSync(CHANNEL_CONFIG_PATH, 'utf-8');
@@ -32,6 +35,7 @@ function loadChannelConfig() {
 // Helper to save config
 function saveChannelConfig(config) {
   try {
+    ensureChannelConfigDir();
     fs.writeFileSync(CHANNEL_CONFIG_PATH, JSON.stringify(config, null, 2));
   } catch (error) {
     console.error('Failed to save channel config:', error);
@@ -736,9 +740,6 @@ const startTelegramBot = (sogni) => {
     }
   });
 
-  /**
-   * If polling fails, exit so PM2 (or another manager) can restart us
-   */
   bot.on('polling_error', (error) => {
     console.error('Polling error:', error);
     console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
@@ -1060,9 +1061,9 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
     const allImages = [];
     const maxNsfwRetries = 2;
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
-      let project = await globalSogni.projects.create({
-        type: 'image',
-        tokenType: "spark",
+      const result = await globalSogni.createImageProject({
+        tokenType: 'spark',
+        network: 'fast',
         modelId: model,
         positivePrompt: prompt,
         negativePrompt: negativePrompt,
@@ -1077,9 +1078,11 @@ async function performGenerationAndSendStickers(prompt, batchSize, msg, messageO
         height: 512,
       });
 
-      console.log(`Project created (attempt ${attempt}): ${project.id} for prompt: "${prompt}"`);
-      const attemptImages = await project.waitForCompletion();
-      console.log(`Project ${project.id} completed. Received ${attemptImages.length} images.`);
+      const attemptImages = result.imageUrls || [];
+      console.log(
+        `Project created (attempt ${attempt}): ${result.project.id} for prompt: "${prompt}". ` +
+          `Received ${attemptImages.length} images.`
+      );
 
       if (attemptImages.length > 0) {
         allImages.push(...attemptImages);
@@ -1234,8 +1237,7 @@ async function performVideoGeneration(prompt, msg, messageOptions, imagePath = n
     console.log(`Creating ${projectType} project with model: ${model}, prompt: "${prompt}"`);
 
     const projectParams = {
-      type: 'video',
-      tokenType: "spark",
+      tokenType: 'spark',
       modelId: model,
       positivePrompt: prompt,
       negativePrompt: 'low quality, blurry, distorted',
@@ -1270,16 +1272,16 @@ async function performVideoGeneration(prompt, msg, messageOptions, imagePath = n
       console.log('Using 512x512 for text-to-video (optimized for speed)');
     }
 
-    let project = await globalSogni.projects.create(projectParams);
+    const result = await globalSogni.createVideoProject(projectParams);
 
-    console.log(`Video project created: ${project.id}`);
+    console.log(`Video project created: ${result.project.id}`);
     const statusMessage = imagePath
       ? '🎬 Image-to-video project created, waiting for completion...'
       : 'Video project created, waiting for completion...';
     bot.sendMessage(chatId, statusMessage, messageOptions);
 
-    const videos = await project.waitForCompletion();
-    console.log(`Video project ${project.id} completed. Received ${videos.length} video(s).`);
+    const videos = result.videoUrls || [];
+    console.log(`Video project ${result.project.id} completed. Received ${videos.length} video(s).`);
 
     if (videos.length === 0) {
       bot.sendMessage(chatId, 'No video was generated. Please try a different prompt!', messageOptions);
@@ -1325,5 +1327,4 @@ async function performVideoGeneration(prompt, msg, messageOptions, imagePath = n
     bot.sendMessage(chatId, 'An error occurred during video generation. Please try again later.', messageOptions);
   }
 }
-
 module.exports = startTelegramBot;

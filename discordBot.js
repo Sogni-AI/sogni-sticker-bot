@@ -6,16 +6,23 @@ const sharp = require('sharp');
 const saveFile = require('./lib/saveFile');
 const removeImageBg = require('./lib/removeImageBgOriginal');
 
+const DATA_DIR = process.env.SOGNI_BOT_DATA_DIR || process.cwd();
+
+function ensureDataDir() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
 // Load the Discord token from the environment variables
 const token = process.env.DISCORD_BOT_TOKEN;
 
 // Video rate limiting
-const VIDEO_RATE_LIMIT_PATH = path.join(__dirname, 'videoRateLimitDiscord.json');
+const VIDEO_RATE_LIMIT_PATH = path.join(DATA_DIR, 'videoRateLimitDiscord.json');
 const MAX_VIDEOS_PER_DAY = 10;
 
 // Helper to load video rate limit data
 function loadVideoRateLimits() {
   try {
+    ensureDataDir();
     if (!fs.existsSync(VIDEO_RATE_LIMIT_PATH)) {
       fs.writeFileSync(VIDEO_RATE_LIMIT_PATH, JSON.stringify({}, null, 2));
     }
@@ -30,6 +37,7 @@ function loadVideoRateLimits() {
 // Helper to save video rate limit data
 function saveVideoRateLimits(limits) {
   try {
+    ensureDataDir();
     fs.writeFileSync(VIDEO_RATE_LIMIT_PATH, JSON.stringify(limits, null, 2));
   } catch (error) {
     console.error('Failed to save video rate limits:', error);
@@ -602,10 +610,9 @@ async function processNextRequest(sogni) {
     const maxNsfwRetries = 2;
 
     for (let attempt = 1; attempt <= maxNsfwRetries; attempt++) {
-      // Create the project
-      let project = await sogni.projects.create({
-        type: 'image',
-        tokenType: "spark",
+      const result = await sogni.createImageProject({
+        tokenType: 'spark',
+        network: 'fast',
         modelId: model,
         positivePrompt: prompt,
         negativePrompt: negativePrompt,
@@ -622,11 +629,9 @@ async function processNextRequest(sogni) {
 
       if (attempt > 1) {
         channel.send(`**Attempt ${attempt}**: Generating...`);
-      } else {
-        //channel.send(`Generating...`);
       }
 
-      images = await project.waitForCompletion();
+      images = result.imageUrls || [];
 
       if (images.length === 0 && attempt < maxNsfwRetries) {
         channel.send('No images generated — possibly NSFW filter false positive. Retrying...');
@@ -687,7 +692,7 @@ async function processNextRequest(sogni) {
  */
 async function processImage(imageUrl, channel, idx) {
   try {
-    const filePath = path.join(__dirname, 'renders', `discord_${Date.now()}_${idx + 1}.png`);
+    const filePath = path.join(process.cwd(), 'renders', `discord_${Date.now()}_${idx + 1}.png`);
 
     // Save the image file
     await saveFile(filePath, imageUrl);
@@ -733,8 +738,7 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
     console.log(`Creating ${projectType} project with model: ${model}, prompt: "${prompt}"`);
 
     const projectParams = {
-      type: 'video',
-      tokenType: "spark",
+      tokenType: 'spark',
       modelId: model,
       positivePrompt: prompt,
       negativePrompt: 'low quality, blurry, distorted',
@@ -766,16 +770,16 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
       console.log('Using 512x512 for text-to-video (optimized for speed)');
     }
 
-    let project = await sogni.projects.create(projectParams);
+    const result = await sogni.createVideoProject(projectParams);
 
-    console.log(`Video project created: ${project.id}`);
+    console.log(`Video project created: ${result.project.id}`);
     const statusMessage = imagePath
       ? '🎬 Image-to-video project created, waiting for completion...'
       : 'Video project created, waiting for completion...';
     channel.send(statusMessage);
 
-    const videos = await project.waitForCompletion();
-    console.log(`Video project ${project.id} completed. Received ${videos.length} video(s).`);
+    const videos = result.videoUrls || [];
+    console.log(`Video project ${result.project.id} completed. Received ${videos.length} video(s).`);
 
     if (videos.length === 0) {
       channel.send('No video was generated. Please try a different prompt!');
@@ -784,7 +788,7 @@ async function handleVideoRequest(sogni, channel, prompt, userId, imagePath = nu
 
     // Download and send the video
     const videoUrl = videos[0];
-    const videoFilePath = path.join(__dirname, 'renders', `discord_video_${Date.now()}.mp4`);
+    const videoFilePath = path.join(process.cwd(), 'renders', `discord_video_${Date.now()}.mp4`);
 
     await saveFile(videoFilePath, videoUrl);
     console.log(`Saved video to ${videoFilePath}`);
