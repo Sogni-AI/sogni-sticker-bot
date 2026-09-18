@@ -620,8 +620,6 @@ async function processNextRequest(sogni) {
         steps: 4,
         guidance: 1,
         numberOfMedia: batchSize,
-        sampler: 'Euler',
-        scheduler: 'linear',
         sizePreset: 'custom',
         width: 512,
         height: 512,
