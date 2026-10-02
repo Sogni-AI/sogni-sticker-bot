@@ -6,6 +6,7 @@ const sharp = require('sharp');
 const saveFile = require('./lib/saveFile');
 const removeImageBg = require('./lib/removeImageBgOriginal');
 const convertImageToSticker = require('./lib/convertImageToSticker');
+const { backoffDelay, telegramRetryAfterMs, telegramStatus } = require('./lib/backoff');
 
 const DATA_DIR = process.env.SOGNI_BOT_DATA_DIR || process.cwd();
 const CHANNEL_CONFIG_PATH = path.join(DATA_DIR, 'channelConfig.json');
@@ -195,10 +196,6 @@ if (!token) {
   console.error('Error: TELEGRAM_BOT_TOKEN is not set in the environment.');
   process.exit(1);
 }
-
-// Track polling errors so we don't spam restarts
-let retryCount = 0;
-const maxRetries = 9999;
 
 let bot = new TelegramBot(token, {
   polling: true,
@@ -739,21 +736,45 @@ const startTelegramBot = (sogni) => {
     }
   });
 
+  // Polling errors are almost always transient (network blips, Telegram 5xx or
+  // 429, a second instance briefly polling the same token). Restarting the whole
+  // process for each one (as before) meant a fresh Sogni login every few seconds
+  // while the error lasted. Pause polling and resume after a growing delay (or
+  // Telegram's retry_after) instead; only a rejected token is fatal.
+  let pollingErrors = 0;
+  let lastPollingErrorAt = 0;
+  let pollingPaused = false;
   bot.on('polling_error', (error) => {
-    console.error('Polling error:', error);
-    console.log(`Polling error occurred. Current retryCount: ${retryCount}`);
-
-    if (retryCount >= maxRetries) {
-      console.error('Max retries reached. Bot is stopping in 5 seconds...');
-      setTimeout(() => {
-        process.exit(1);
-      }, 5000);
+    const status = telegramStatus(error);
+    if (status === 401 || status === 404) {
+      console.error(`Telegram rejected the bot token (${status}); exiting in 5 seconds:`, error.message);
+      setTimeout(() => process.exit(1), 5000);
       return;
     }
 
-    retryCount++;
-    console.log('Restarting process in 5 seconds due to polling error...');
-    setTimeout(() => process.exit(1), 5000);
+    // Ten quiet minutes since the last error: start the backoff over.
+    if (Date.now() - lastPollingErrorAt > 10 * 60 * 1000) pollingErrors = 0;
+    lastPollingErrorAt = Date.now();
+    pollingErrors++;
+    const delay = telegramRetryAfterMs(error) ?? backoffDelay(pollingErrors);
+    console.error(
+      `Polling error #${pollingErrors} (${error.code || 'unknown'}${status ? ` ${status}` : ''}): ${error.message}. ` +
+        `Pausing polling for ${Math.round(delay / 1000)} s`
+    );
+
+    if (pollingPaused) return;
+    pollingPaused = true;
+    Promise.resolve()
+      .then(() => bot.stopPolling({ cancel: true }))
+      .catch((stopError) => console.error('Could not pause polling:', stopError.message))
+      .finally(() => {
+        setTimeout(() => {
+          pollingPaused = false;
+          Promise.resolve()
+            .then(() => bot.startPolling())
+            .catch((startError) => console.error('Could not resume polling:', startError.message));
+        }, delay);
+      });
   });
 
   /**

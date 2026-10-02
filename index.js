@@ -2,6 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const express = require('express');
 const { SogniClientWrapper, ClientEvent } = require('@sogni-ai/sogni-intelligence-client');
+const { backoffDelay, sogniStatus, sogniRetryAfterMs } = require('./lib/backoff');
 
 // Express app setup
 const app = express();
@@ -40,14 +41,31 @@ function withSogniSocketAppSource(socketEndpoint) {
 }
 
 /**
- * Connect to the Sogni API through the wrapper.
- * On startup failure, we log and exit so that an external process can restart us.
+ * Connect to the Sogni API, retrying in this process with a growing delay
+ * (30 s doubling to 5 min, or Retry-After on a 429). Exiting on every failure
+ * (as before) meant pm2 restarted us every few seconds: a fresh login each time
+ * for as long as the error lasted. Rejected credentials still end the process.
  */
 async function connectSogni() {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await createSogniClient();
+    } catch (error) {
+      const status = sogniStatus(error);
+      if (status === 401 || status === 403) throw error;
+      const delay = (status === 429 && sogniRetryAfterMs(error)) || backoffDelay(attempt, { baseMs: 30 * 1000 });
+      console.error(`Could not connect to Sogni (attempt ${attempt}${status ? `, HTTP ${status}` : ''}): ${error.message}. Retrying in ${Math.round(delay / 1000)} s`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+async function createSogniClient() {
+  let sogni;
   try {
     console.log('Attempting to create Sogni client wrapper instance...');
 
-    const sogni = new SogniClientWrapper({
+    sogni = new SogniClientWrapper({
       username: process.env.SOGNI_USERNAME,
       password: process.env.SOGNI_PASSWORD,
       appId: process.env.APP_ID,
@@ -81,8 +99,12 @@ async function connectSogni() {
     return sogni;
   } catch (error) {
     console.error('Error initializing Sogni API client:', error);
-    console.error('Exiting in 5 seconds...');
-    setTimeout(() => process.exit(1), 5000);
+    // Never leave a half-connected client behind to reconnect on its own.
+    try {
+      await sogni?.disconnect();
+    } catch {
+      /* already closed */
+    }
     throw error;
   }
 }
@@ -109,4 +131,6 @@ connectSogni()
   })
   .catch((err) => {
     console.error('Could not start up fully due to Sogni initialization error:', err);
+    console.error('Exiting in 5 seconds...');
+    setTimeout(() => process.exit(1), 5000);
   });
