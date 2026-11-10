@@ -706,7 +706,7 @@ async function processImage(imageUrl, channel, idx) {
     }
 
     // Get image buffer from Jimp object
-    const imageBuffer = await stickerImage.getBufferAsync('image/png');
+    const imageBuffer = await stickerImage.getBuffer('image/png');
 
     // Create an attachment from the buffer
     const attachment = new AttachmentBuilder(imageBuffer, { name: `sogni_sticker_${idx + 1}.png` });

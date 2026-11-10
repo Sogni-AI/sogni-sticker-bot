@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node --test"
   },
   "files": [
     "assets",
@@ -46,12 +47,17 @@
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
-    "jimp": "^0.22.12",
-    "node-telegram-bot-api": "^0.66.0",
-    "replace-color": "^2.3.0",
-    "sharp": "0.35.3"
+    "jimp": "1.6.1",
+    "node-telegram-bot-api": "0.67.0",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
+  },
+  "overrides": {
+    "uuid": "11.1.1",
+    "qs": "6.16.1",
+    "request": "npm:@cypress/request@4.0.1",
+    "zod": "4.6.6"
   }
 }
