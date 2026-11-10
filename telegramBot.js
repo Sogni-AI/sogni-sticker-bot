@@ -1217,7 +1217,7 @@ async function processSingleImage(imageUrl, idx, chatId, threadOptions) {
   }
 
   const bgRemovedFilePath = filePath.replace('.png', '_nobg.png');
-  await stickerImage.writeAsync(bgRemovedFilePath);
+  await stickerImage.write(bgRemovedFilePath);
   console.log(`Saved background-removed image to ${bgRemovedFilePath}`);
 
   // Convert to sticker

@@ -1,7 +1,11 @@
+const path = require('node:path');
+
 module.exports = {
   apps: [{
     name: "stickerbot",
     script: "./index.js",
+    interpreter: process.execPath,
+    env: { PATH: `${path.dirname(process.execPath)}:${process.env.PATH || ''}` },
     autorestart: true,
     watch: false,
     log_date_format: 'YYYY-MM-DD HH:mm:ss',
