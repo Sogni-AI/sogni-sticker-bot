@@ -49,9 +49,17 @@
     "jimp": "^0.22.12",
     "node-telegram-bot-api": "^0.66.0",
     "replace-color": "^2.3.0",
-    "sharp": "0.35.3"
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
+  },
+  "overrides": {
+    "request": {
+      "form-data": "2.5.6"
+    },
+    "replace-color": {
+      "jpeg-js": "0.4.4"
+    }
   }
 }
